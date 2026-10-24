@@ -1,0 +1,7 @@
+numpy>=2.0,<3.0
+requests>=2.32
+shapely>=2.0
+pyproj>=3.6
+tifffile>=2025.5
+pyarrow>=19
+
