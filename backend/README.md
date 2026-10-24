@@ -6,11 +6,17 @@ iOS app.
 
 | File | Purpose |
 |---|---|
-| `service.py` | `build_flood_payload` and the HTTP API (`/flood`, `/waterbodies`, `/health`) |
-| `data_sources.py` | Remote data (3DEP, NLCD, SSURGO, NHD/OSM, NOAA VDatum), caches, Groundsource index |
-| `hydrology.py` | Geometry helpers, SCS runoff + D8 ponding model, contour vectorization |
-| `tests/test_service.py` | Unit tests |
-| `test_timer.py` | Times a live Miami `/flood` call (needs the server running) |
+| `floodsight/http_api.py`, `server_startup.py` | HTTP endpoints (`/flood`, `/waterbodies`, `/health`) and CLI |
+| `floodsight/flood_payload.py` | `build_flood_payload`: orchestrates one estimate |
+| `floodsight/rainfall_inputs.py` | Rainfall / retained-fraction input resolution |
+| `floodsight/source_fetching.py` | Parallel fetch of all datasets |
+| `floodsight/flood_depth_model.py` | SCS+D8 and legacy depth models, Groundsource drainage multiplier |
+| `floodsight/scs_runoff.py`, `terrain_ponding_solver.py` | Curve numbers, runoff, D8 ponding |
+| `floodsight/grid_geometry.py`, `contour_polygons.py` | Grid/CRS helpers, depth-contour polygons |
+| `floodsight/*_source.py`, `groundsource_history.py` | DEM, NLCD, SSURGO, waterbody, VDatum and Groundsource data access |
+| `floodsight/request_caching.py` | TTL cache for upstream requests |
+| `tests/` | Unit tests, one file per topic |
+| `time_flood_estimate.py` | Times live `/flood` calls (cold and warm) at Florida cities |
 | `Dockerfile`, `docker-compose.yml` | Container hosting |
 | `API.md` | Endpoint reference for frontend integration |
 
@@ -22,7 +28,7 @@ Python 3.11+:
 py -3.11 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-python service.py --port 8000
+python -m floodsight --port 8000
 ```
 
 ## Run with Docker
@@ -40,5 +46,5 @@ See [API.md](API.md) for hosting notes (cache volume, security, HTTPS).
 ## Tests
 
 ```powershell
-$env:PYTHONPATH="."; python -m unittest tests.test_service -v
+python -m unittest discover -s tests -t . -v
 ```

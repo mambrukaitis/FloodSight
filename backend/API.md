@@ -124,7 +124,7 @@ docker compose up -d --build
 curl http://<host>:8000/health
 ```
 
-The container runs `python service.py --host 0.0.0.0 --port 8000` as a non-root
+The container runs `python -m floodsight --host 0.0.0.0 --port 8000` as a non-root
 user, has a health check, and restarts automatically. Port is configurable via
 `FLOODSIGHT_PORT`.
 
