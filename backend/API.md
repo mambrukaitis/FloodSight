@@ -7,7 +7,7 @@ and no CORS (the client is a native iOS app, which does not need it).
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Liveness / readiness |
-| POST | `/flood` | Modeled flood depth + contours for a point and bbox |
+| POST | `/flood` | Modeled flood depth + contours for a box (two corners) |
 | GET | `/waterbodies` | Mapped surface water in a bbox (GeoJSON) |
 
 ## `GET /health`
@@ -26,18 +26,16 @@ Request body (JSON, max 64,000 bytes):
 
 ```json
 {
-  "latitude": 29.6516,
-  "longitude": -82.3248,
-  "bbox_wgs84": [-82.3262, 29.6506, -82.3234, 29.6526],
+  "southwest": { "latitude": 29.6506, "longitude": -82.3262 },
+  "northeast": { "latitude": 29.6526, "longitude": -82.3234 },
   "rainfall_inches": 6
 }
 ```
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
-| `latitude` | number | yes | WGS84, -90..90 |
-| `longitude` | number | yes | WGS84, -180..180 |
-| `bbox_wgs84` | `[west, south, east, north]` | yes | Positive area, must contain the point, each side at most 7° |
+| `southwest` | `{latitude, longitude}` | yes | Bottom-left corner of the box (WGS84) |
+| `northeast` | `{latitude, longitude}` | yes | Top-right corner of the box. Must be north and east of `southwest`; each side at most 7° |
 | `rainfall_inches` | number ≥ 0 | one of | Total rainfall |
 | `rainfall_intensity_inches_per_hour` + `rainfall_duration_hours` | numbers | one of | Multiplied to get total rainfall |
 | `retained_water_fraction` | number 0..1 | no | Selects the legacy retained-rainfall model. Leave unset. |
@@ -65,7 +63,7 @@ Success (200):
 }
 ```
 
-- `ar_flood_data` describes the requested coordinate only.
+- `ar_flood_data` describes the centre point of the box.
 - Field names say "msl", but the real vertical reference is `elevation_datum`
   (NOAA VDatum converts NAVD 88 to local mean sea level where available;
   otherwise source-datum values are returned and labelled). Depth differences
@@ -124,7 +122,7 @@ docker compose up -d --build
 curl http://<host>:8000/health
 ```
 
-The container runs `python service.py --host 0.0.0.0 --port 8000` as a non-root
+The container runs `python -m floodsight --host 0.0.0.0 --port 8000` as a non-root
 user, has a health check, and restarts automatically. Port is configurable via
 `FLOODSIGHT_PORT`.
 
