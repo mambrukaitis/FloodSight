@@ -17,7 +17,6 @@ from data_sources import (
     _SPATIAL_CACHE_LOCK,
     _cached_spatial_data,
     _decode_nlcd_values,
-    _latest_daily_stage,
     _navd88_to_lmsl_offset,
     _spatial_cache_key,
     _waterbody_feature_collection,
@@ -455,31 +454,6 @@ class FloodPayloadTests(unittest.TestCase):
                 32617,
                 water_surface_meters=float("nan"),
             )
-
-    def test_latest_daily_stage_preserves_observation_date_and_age(self) -> None:
-        station = {
-            "station_id": "USGS-02240976",
-            "name": "Tumblin Creek",
-            "distance_from_center_km": 1.465,
-        }
-        response = {
-            "features": [
-                {
-                    "properties": {
-                        "parameter_code": "00065",
-                        "value": "2.67",
-                        "unit_of_measure": "ft",
-                        "time": "1998-09-29",
-                    }
-                }
-            ]
-        }
-        with patch("data_sources.get_json", return_value=response):
-            observations, errors = _latest_daily_stage(object(), [station])
-        self.assertEqual(errors, [])
-        self.assertEqual(observations[0]["value"], "2.67")
-        self.assertEqual(observations[0]["time"], "1998-09-29")
-        self.assertGreater(observations[0]["age_days"], 7)
 
     def test_payload_emits_numeric_assumption_based_payload(self) -> None:
         bbox = (-82.35, 29.64, -82.34, 29.65)

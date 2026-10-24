@@ -1,0 +1,9 @@
+.cache
+__pycache__
+*.py[cod]
+tests
+test_timer.py
+*.md
+Dockerfile
+docker-compose.yml
+.dockerignore

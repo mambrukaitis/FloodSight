@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import io
 import json
 import math
+import os
 from pathlib import Path
 import pickle
 import threading
@@ -25,8 +26,6 @@ from shapely import STRtree, transform
 from shapely.geometry import LineString, Polygon, box, shape
 from shapely.ops import polygonize, unary_union
 
-from flood_heartbeat.common import get_json
-from flood_heartbeat.usgs import COLLECTIONS_URL
 from hydrology import (
     _local_utm_epsg,
     _polygon_ring_coordinates,
@@ -42,9 +41,8 @@ THREEDEP_IDENTIFY_URL = THREEDEP_EXPORT_URL.rsplit("/", 1)[0] + "/identify"
 
 MAX_DEM_PIXELS = 50_000
 
-GROUND_SOURCE_PATH = (
-    Path(__file__).parent / ".cache" / "groundsource" / "groundsource_2026.parquet"
-)
+CACHE_DIR = Path(os.environ.get("FLOODSIGHT_CACHE_DIR") or Path(__file__).parent / ".cache")
+GROUND_SOURCE_PATH = CACHE_DIR / "groundsource" / "groundsource_2026.parquet"
 GROUNDSOURCE_BUFFER_DEGREES = 0.015  # ~1.5 km of surrounding historical context
 GROUNDSOURCE_FLORIDA_BOUNDS = (-88.0, 24.0, -79.5, 31.5)
 _GROUNDSOURCE_INDEX: dict[tuple[str, int, int], tuple[Any, np.ndarray]] = {}
@@ -939,59 +937,6 @@ def _navd88_to_lmsl_offset(
         ),
         "source": NOAA_VDATUM_URL,
     }
-
-
-def _latest_daily_stage(
-    session: requests.Session,
-    stream_stations: list[dict[str, Any]],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    endpoint = f"{COLLECTIONS_URL}/latest-daily/items"
-    observations = []
-    errors = []
-    for station in stream_stations:
-        try:
-            data = get_json(
-                session,
-                endpoint,
-                {
-                    "f": "json",
-                    "limit": 100,
-                    "monitoring_location_id": station["station_id"],
-                    "parameter_code": "00065",
-                },
-            )
-        except (requests.RequestException, RuntimeError, ValueError) as exc:
-            errors.append(f"Latest daily stage for {station['station_id']}: {exc}")
-            continue
-        for feature in data.get("features", []):
-            properties = feature.get("properties", {})
-            if str(properties.get("parameter_code", "")) != "00065":
-                continue
-            observed_at = str(properties.get("time", ""))
-            try:
-                observed_date = datetime.fromisoformat(observed_at[:10]).date()
-                age_days = (datetime.now(timezone.utc).date() - observed_date).days
-            except ValueError:
-                age_days = None
-            observations.append(
-                {
-                    "station_id": station["station_id"],
-                    "station_name": station["name"],
-                    "distance_km": station["distance_from_center_km"],
-                    "value": properties.get("value"),
-                    "unit": properties.get("unit_of_measure"),
-                    "time": observed_at,
-                    "age_days": age_days,
-                    "approval_status": properties.get("approval_status"),
-                    "vertical_datum": properties.get("vertical_datum_name")
-                    or properties.get("vertical_datum"),
-                }
-            )
-    observations.sort(
-        key=lambda item: (item["time"], item["distance_km"]),
-        reverse=True,
-    )
-    return observations, errors
 
 
 def _datum_and_offset(

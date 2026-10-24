@@ -1,0 +1,10 @@
+services:
+  floodsight:
+    build: .
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${FLOODSIGHT_PORT:-8000}:8000"
+    volumes:
+      # Holds groundsource/groundsource_2026.parquet (optional) and its generated index.
+      - ./.cache:/data/cache
