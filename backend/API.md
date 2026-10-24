@@ -139,6 +139,16 @@ writable by uid 1000 (`chown -R 1000 .cache` on Linux). Without the parquet,
 `/health` reports `groundsource_available: false` and the historical
 adjustment is skipped.
 
+### Letting other computers on the same network reach it
+
+`docker-compose.yml` publishes port 8000 on all host interfaces, so any device
+on the same network can call `http://<host-LAN-IP>:8000`. Find the IP with
+`ipconfig` (Windows) or `ip addr` (Linux). If the host OS firewall blocks it,
+allow the port, for example (Windows, admin PowerShell):
+`New-NetFirewallRule -DisplayName FloodSight -Direction Inbound -Protocol TCP -LocalPort 8000 -Action Allow`.
+Some networks (campus Wi-Fi such as eduroam, guest Wi-Fi) isolate clients from
+each other; use a personal hotspot or a tunnel (Tailscale, ngrok) there.
+
 ### Reaching it from the iOS app
 
 - Simulator on the same machine: `http://localhost:8000`.
