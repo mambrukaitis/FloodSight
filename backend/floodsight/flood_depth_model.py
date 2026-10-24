@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import math
 import numpy as np
 
 from floodsight.grid_geometry import resample_continuous_grid
@@ -22,8 +23,8 @@ from floodsight.terrain_ponding_solver import (
     solve_retained_rainfall_surface,
 )
 
-MAX_DRAINAGE_MULTIPLIER = 1.15
-DRAINAGE_MULTIPLIER_PER_HISTORICAL_EVENT = 0.03
+MAX_DRAINAGE_MULTIPLIER = 1.25
+EVENT_SCALAR = 0.0145  # Reaches ~1.13 at 80 events and ~1.25 at 300 events
 METERS_TO_INCHES = 39.3700787402
 INCHES_TO_METERS = 0.0254
 
@@ -67,7 +68,7 @@ def _run_scs_d8_model(
     # Up to +15% runoff depth for areas with chronic historical flood news reports.
     urban_drainage_multiplier = min(
         MAX_DRAINAGE_MULTIPLIER,
-        1.0 + historical_event_count * DRAINAGE_MULTIPLIER_PER_HISTORICAL_EVENT,
+        1.0 + (math.sqrt(historical_event_count) * EVENT_SCALAR)
     )
     runoff_depth_grid = runoff_depth_grid * urban_drainage_multiplier
 

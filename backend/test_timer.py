@@ -1,10 +1,3 @@
-"""Times `build_flood_payload` (no HTTP server needed) at several Florida locations.
-
-Run from the backend directory:  python time_flood_estimate.py
-Each location is run twice: the first call is "cold" (downloads data from the
-public services), the second is "warm" (served from the in-process cache).
-"""
-
 import time
 
 from floodsight.flood_payload import build_flood_payload
@@ -34,9 +27,14 @@ def main() -> None:
             )
             elapsed = time.perf_counter() - started
             model = diagnostics["model"]
+            
+            # Print the maximum grid depth to give you an idea of the flooding extent
+            max_depth = model.get("maximum_grid_depth_meters", 0)
+            
             print(
                 f"{name:<12} {label}: {elapsed:5.2f} s | "
                 f"flooded={payload['ar_flood_data']['is_flooded']} | "
+                f"max grid depth={max_depth:.2f}m | "
                 f"groundsource events={model['historical_groundsource_events']} | "
                 f"multiplier={model['backend_urban_drainage_calibration_multiplier']}"
             )
