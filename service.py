@@ -49,6 +49,7 @@ USGS_CACHE_TTL_SECONDS = 300
 GROUND_SOURCE_PATH = (
     Path(__file__).parent / ".cache" / "groundsource" / "groundsource_2026.parquet"
 )
+GROUNDSOURCE_BUFFER_DEGREES = 0.015  # ~1.5 km of surrounding historical context
 GROUNDSOURCE_FLORIDA_BOUNDS = (-88.0, 24.0, -79.5, 31.5)
 _GROUNDSOURCE_INDEX: dict[tuple[str, int, int], tuple[Any, np.ndarray]] = {}
 _GROUNDSOURCE_INDEX_LOCK = threading.Lock()
@@ -305,6 +306,18 @@ def _groundsource_event_count(
         if shapely.intersection(geometries[position], query).area > 0
     )
     return {"events_intersecting_area": count}
+
+
+def _buffered_bbox(
+    bbox: tuple[float, float, float, float],
+    buffer_degrees: float,
+) -> tuple[float, float, float, float]:
+    return (
+        bbox[0] - buffer_degrees,
+        bbox[1] - buffer_degrees,
+        bbox[2] + buffer_degrees,
+        bbox[3] + buffer_degrees,
+    )
 
 
 def _groundsource_job(
@@ -1788,7 +1801,7 @@ def build_flood_payload(
             ),
             "groundsource": executor.submit(
                 _groundsource_job,
-                analysis_bbox_wgs84,
+                _buffered_bbox(analysis_bbox_wgs84, GROUNDSOURCE_BUFFER_DEGREES),
                 GROUND_SOURCE_PATH,
             ),
             "waterbodies": executor.submit(
