@@ -68,6 +68,25 @@ expected by the Swift model, `reitz_union_diagnostics.json` separately, and
 `reitz_union_waterbodies.geojson`. The Lake Alice option writes corresponding
 `lake_alice_*` files. Diagnostics record the model inputs and source status.
 
+The independent terrain, datum, gage, land-cover, soil, waterbody, and
+Groundsource requests are launched concurrently. Static spatial responses are
+kept in a process-local TTL cache; USGS station context has a shorter cache,
+and Groundsource retains its bbox-keyed disk cache. CLI-generated diagnostics
+include per-source timings, cache hit/miss status, parallel-fetch wall time,
+and total model-build time. The `/flood` response remains the existing Swift
+payload and does not expose diagnostics. These optimizations reduce repeat
+latency but cannot guarantee a sub-five-second cold request because upstream
+services can be slow or unavailable. The 3DEP vertical-datum metadata lookup
+has a short timeout because it does not affect relative flood-depth math; if it
+times out, diagnostics identify the datum as unknown rather than guessing.
+
+The model currently still runs D8 routing at every requested scale. None of
+the available direct/context sources supplies spatially matched numeric
+rainfall-flood depths that could safely replace that computation: Groundsource
+has event footprints without depth labels, while FEMA zones are hazard
+classifications. Skipping D8 based on zoom alone would change the meaning and
+accuracy of the returned depth estimates.
+
 Run the service tests with:
 
 ```powershell

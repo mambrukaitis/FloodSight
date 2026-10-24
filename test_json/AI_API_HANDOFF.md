@@ -33,6 +33,17 @@ directory. The output generators and API call several external data services,
 so an endpoint response may take time and may fail when an upstream service or
 required local cache is unavailable.
 
+Independent source requests run concurrently. Static spatial responses and
+short-lived USGS context are cached in-process; Groundsource has a separate
+bbox-keyed disk cache. `build_flood_payload` diagnostics include per-source
+timings and cache status, but `/flood` intentionally returns only the
+established iOS payload. A cold Lake Alice request was measured at about
+4.3 seconds in one live run; cached repeat requests can be substantially
+faster, but external-service latency means this is not a guaranteed SLA.
+3DEP vertical-datum metadata is best-effort with a short timeout; if unavailable,
+the returned datum is explicitly unknown rather than guessed. This affects
+absolute elevation labeling, not depth differences.
+
 ## Flood endpoint
 
 `POST /flood` accepts a JSON object:

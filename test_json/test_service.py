@@ -13,12 +13,16 @@ from pyproj import Transformer
 from shapely.geometry import Point, Polygon, box, shape
 
 from test_json.service import (
+    _SPATIAL_CACHE,
+    _SPATIAL_CACHE_LOCK,
+    _cached_spatial_data,
     _curve_number_grid,
     _decode_nlcd_values,
     _solve_d8_catchment_ponding,
     _latest_daily_stage,
     _navd88_to_lmsl_offset,
     _resample_continuous_grid,
+    _spatial_cache_key,
     _scs_runoff_depth_grid,
     _solve_retained_rainfall_surface,
     _validate_request,
@@ -33,6 +37,33 @@ from test_json.service import (
 
 
 class FloodPayloadTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with _SPATIAL_CACHE_LOCK:
+            _SPATIAL_CACHE.clear()
+
+    def test_spatial_data_cache_uses_ttl_and_returns_independent_values(self) -> None:
+        calls = 0
+
+        def load() -> dict[str, list[int]]:
+            nonlocal calls
+            calls += 1
+            return {"values": [1, 2]}
+
+        first, first_hit, _ = _cached_spatial_data(("test",), 60, load)
+        first["values"].append(3)
+        second, second_hit, _ = _cached_spatial_data(("test",), 60, load)
+
+        self.assertFalse(first_hit)
+        self.assertTrue(second_hit)
+        self.assertEqual(calls, 1)
+        self.assertEqual(second, {"values": [1, 2]})
+
+    def test_cache_key_supports_station_id_sequences(self) -> None:
+        self.assertEqual(
+            _spatial_cache_key("daily", ("USGS-0123", "USGS-0456")),
+            ("daily", ("USGS-0123", "USGS-0456")),
+        )
+
     def test_nlcd_palette_indices_decode_to_landcover_classes(self) -> None:
         values = np.array([[3, 4, 5, 6, 10, 20]], dtype=np.uint8)
         color_map = np.zeros((3, 256), dtype=np.uint16)
@@ -414,6 +445,15 @@ class FloodPayloadTests(unittest.TestCase):
         self.assertEqual(
             diagnostics["request"]["rainfall_intensity_inches_per_hour"],
             5.4,
+        )
+        self.assertGreaterEqual(
+            diagnostics["performance"]["total_build_seconds"],
+            diagnostics["performance"]["parallel_source_fetch_wall_seconds"],
+        )
+        self.assertFalse(diagnostics["performance"]["d8_skipped"])
+        self.assertIn(
+            "no spatially matched numeric rainfall-flood depths",
+            diagnostics["performance"]["why_d8_remains_enabled"],
         )
         expected_runoff_inches = float(
             _scs_runoff_depth_grid(2.7, np.full((2, 2), 80.0))[0, 0]

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import copy
 from datetime import datetime, timezone
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -8,6 +10,8 @@ import io
 import json
 import math
 from pathlib import Path
+import threading
+from time import perf_counter
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 import xml.etree.ElementTree as ET
@@ -32,6 +36,13 @@ GROUND_SOURCE_PATH = Path(".cache/groundsource/groundsource_2026.parquet")
 DEFAULT_BBOX_SIDE_METERS = 100.0
 USGS_SEARCH_RADIUS_KM = 5.0
 MAX_DEM_PIXELS = 50_000
+MAX_PARALLEL_DATA_REQUESTS = 6
+DEM_CACHE_TTL_SECONDS = 86_400
+NLCD_CACHE_TTL_SECONDS = 30 * 86_400
+SSURGO_CACHE_TTL_SECONDS = 7 * 86_400
+WATERBODY_CACHE_TTL_SECONDS = 86_400
+VDATUM_CACHE_TTL_SECONDS = 30 * 86_400
+USGS_CACHE_TTL_SECONDS = 300
 DEPTH_THRESHOLDS_METERS = (0.1, 0.2, 0.3, 1.0)
 DEFAULT_RAINFALL_INCHES = 10.0
 MAX_CONTOUR_VERTICES = 15
@@ -91,6 +102,8 @@ LAKE_ALICE = {
     "longitude": -82.36122382833753,
     "osm_relation_id": 1630473,
 }
+_SPATIAL_CACHE: dict[tuple[Any, ...], tuple[float, Any]] = {}
+_SPATIAL_CACHE_LOCK = threading.Lock()
 
 
 def bbox_around_point(
@@ -158,6 +171,105 @@ def _analysis_domain(
         interleaved=False,
     )
     return expanded_wgs84.bounds, expanded_metric
+
+
+def _spatial_cache_key(source: str, *values: Any) -> tuple[Any, ...]:
+    def normalize(value: Any) -> Any:
+        if isinstance(value, (tuple, list)):
+            return tuple(normalize(item) for item in value)
+        if isinstance(value, float):
+            return round(value, 7)
+        return value
+
+    normalized = tuple(normalize(value) for value in values)
+    return (source, *normalized)
+
+
+def _cached_spatial_data(
+    key: tuple[Any, ...],
+    ttl_seconds: float,
+    loader: Any,
+) -> tuple[Any, bool, float]:
+    started = perf_counter()
+    now = started
+    with _SPATIAL_CACHE_LOCK:
+        cached = _SPATIAL_CACHE.get(key)
+        if cached is not None and cached[0] > now:
+            return copy.deepcopy(cached[1]), True, perf_counter() - started
+        if cached is not None:
+            del _SPATIAL_CACHE[key]
+    value = loader()
+    with _SPATIAL_CACHE_LOCK:
+        _SPATIAL_CACHE[key] = (perf_counter() + ttl_seconds, copy.deepcopy(value))
+    return value, False, perf_counter() - started
+
+
+def _using_session(session: requests.Session | None, operation: Any) -> Any:
+    if session is not None:
+        return operation(session)
+    with requests.Session() as local_session:
+        return operation(local_session)
+
+
+def _dem_grid_shape(
+    bbox_wgs84: tuple[float, float, float, float],
+    metric_crs: int,
+) -> tuple[int, int]:
+    projected = transform(
+        box(*bbox_wgs84),
+        Transformer.from_crs("EPSG:4326", metric_crs, always_xy=True).transform,
+        interleaved=False,
+    )
+    xmin, ymin, xmax, ymax = projected.bounds
+    width_m, height_m = xmax - xmin, ymax - ymin
+    if width_m <= 0 or height_m <= 0:
+        raise ValueError("Bounding box has no area after projection.")
+    pixel_size_m = max(1.0, math.sqrt(width_m * height_m / MAX_DEM_PIXELS))
+    columns = max(1, math.ceil(width_m / pixel_size_m))
+    rows = max(1, math.ceil(height_m / pixel_size_m))
+    while rows * columns > MAX_DEM_PIXELS:
+        pixel_size_m *= math.sqrt(rows * columns / MAX_DEM_PIXELS)
+        columns = max(1, math.ceil(width_m / pixel_size_m))
+        rows = max(1, math.ceil(height_m / pixel_size_m))
+    return rows, columns
+
+
+def _cached_source_job(
+    source_name: str,
+    key: tuple[Any, ...],
+    ttl_seconds: float,
+    session: requests.Session | None,
+    operation: Any,
+) -> tuple[Any, dict[str, Any]]:
+    value, cache_hit, elapsed = _cached_spatial_data(
+        key,
+        ttl_seconds,
+        lambda: _using_session(session, operation),
+    )
+    return value, {
+        "elapsed_seconds": elapsed,
+        "cache": "hit" if cache_hit else "miss",
+        "source": source_name,
+    }
+
+
+def _groundsource_job(
+    bbox_wgs84: tuple[float, float, float, float],
+    parquet_path: Path,
+    cache_dir: Path,
+) -> tuple[tuple[dict[str, Any], list[str]], dict[str, Any]]:
+    started = perf_counter()
+    result = _groundsource_report(bbox_wgs84, parquet_path, cache_dir)
+    report, notes = result
+    return result, {
+        "elapsed_seconds": perf_counter() - started,
+        "cache": (
+            "disk-hit"
+            if any("cache hit" in note.lower() for note in notes)
+            else "disk-miss"
+        ),
+        "source": "Groundsource",
+    }
 
 
 def _resample_continuous_grid(
@@ -1354,7 +1466,7 @@ def _dem_vertical_datum(
                 "returnCatalogItems": "true",
                 "f": "json",
             },
-            timeout=(10, 45),
+            timeout=(2, 2),
         )
         response.raise_for_status()
         data = response.json()
@@ -1554,6 +1666,7 @@ def build_flood_payload(
     The requested schema has no field for uncertainty or provenance, so those
     details are returned in diagnostics and documented alongside the payload.
     """
+    request_started = perf_counter()
     _validate_request(latitude, longitude, bbox_wgs84)
     has_intensity = rainfall_intensity_inches_per_hour is not None
     has_duration = rainfall_duration_hours is not None
@@ -1588,7 +1701,6 @@ def build_flood_payload(
         or not 0 <= retained_water_fraction <= 1
     ):
         raise ValueError("Retained-water fraction must be between 0 and 1.")
-    session = session or requests.Session()
     metric_crs = _local_utm_epsg(latitude, longitude)
     forward = Transformer.from_crs(
         "EPSG:4326",
@@ -1602,10 +1714,171 @@ def build_flood_payload(
         interleaved=False,
     )
     requested_metric_bounds = requested_projected.bounds
-    analysis_bbox_wgs84, _ = _analysis_domain(bbox_wgs84, metric_crs)
-    dem_values, dem_bounds, dem_nodata, metric_crs = _fetch_dem(
-        session, latitude, longitude, analysis_bbox_wgs84
+    analysis_bbox_wgs84, analysis_metric_bounds = _analysis_domain(
+        bbox_wgs84,
+        metric_crs,
     )
+    predicted_dem_shape = _dem_grid_shape(analysis_bbox_wgs84, metric_crs)
+    source_timings: dict[str, Any] = {}
+    started = perf_counter()
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_DATA_REQUESTS) as executor:
+        futures = {
+            "dem": executor.submit(
+                _cached_source_job,
+                "3DEP elevation",
+                _spatial_cache_key(
+                    "dem",
+                    metric_crs,
+                    analysis_metric_bounds,
+                    predicted_dem_shape,
+                ),
+                DEM_CACHE_TTL_SECONDS,
+                session,
+                lambda active_session: _fetch_dem(
+                    active_session,
+                    latitude,
+                    longitude,
+                    analysis_bbox_wgs84,
+                ),
+            ),
+            "datum": executor.submit(
+                _cached_source_job,
+                "3DEP vertical datum metadata",
+                _spatial_cache_key(
+                    "dem_datum",
+                    metric_crs,
+                    latitude,
+                    longitude,
+                ),
+                VDATUM_CACHE_TTL_SECONDS,
+                session,
+                lambda active_session: _dem_vertical_datum(
+                    active_session,
+                    latitude,
+                    longitude,
+                    metric_crs,
+                ),
+            ),
+            "usgs": executor.submit(
+                _cached_source_job,
+                "USGS WDFN",
+                _spatial_cache_key(
+                    "usgs",
+                    round(latitude, 4),
+                    round(longitude, 4),
+                    USGS_SEARCH_RADIUS_KM,
+                ),
+                USGS_CACHE_TTL_SECONDS,
+                session,
+                lambda active_session: run_usgs(
+                    StudyArea(
+                        latitude=latitude,
+                        longitude=longitude,
+                        radius_km=USGS_SEARCH_RADIUS_KM,
+                    ),
+                    session=active_session,
+                ),
+            ),
+            "groundsource": executor.submit(
+                _groundsource_job,
+                bbox_wgs84,
+                groundsource_parquet,
+                cache_dir,
+            ),
+            "waterbodies": executor.submit(
+                _cached_source_job,
+                "surface-water polygons",
+                _spatial_cache_key(
+                    "waterbodies",
+                    analysis_bbox_wgs84,
+                    metric_crs,
+                ),
+                WATERBODY_CACHE_TTL_SECONDS,
+                session,
+                lambda active_session: _fetch_waterbodies(
+                    active_session,
+                    analysis_bbox_wgs84,
+                    metric_crs,
+                    analysis_metric_bounds,
+                ),
+            ),
+            "nlcd": executor.submit(
+                _cached_source_job,
+                "MRLC NLCD",
+                _spatial_cache_key(
+                    "nlcd",
+                    analysis_metric_bounds,
+                    metric_crs,
+                ),
+                NLCD_CACHE_TTL_SECONDS,
+                session,
+                lambda active_session: _fetch_nlcd_landcover(
+                    active_session,
+                    analysis_metric_bounds,
+                    metric_crs,
+                    predicted_dem_shape,
+                ),
+            ),
+            "soils": executor.submit(
+                _cached_source_job,
+                "USDA SSURGO",
+                _spatial_cache_key(
+                    "ssurgo",
+                    analysis_bbox_wgs84,
+                    predicted_dem_shape,
+                ),
+                SSURGO_CACHE_TTL_SECONDS,
+                session,
+                lambda active_session: _fetch_ssurgo_hydrologic_soil_grid(
+                    active_session,
+                    analysis_bbox_wgs84,
+                    predicted_dem_shape,
+                ),
+            ),
+        }
+        dem_result, source_timings["dem"] = futures["dem"].result()
+        dem_values, dem_bounds, dem_nodata, metric_crs = dem_result
+        datum_result, source_timings["dem_datum"] = futures["datum"].result()
+        dem_datum, datum_note = datum_result
+        usgs_result, source_timings["usgs"] = futures["usgs"].result()
+        (groundsource, scan_notes), source_timings["groundsource"] = (
+            futures["groundsource"].result()
+        )
+        (waterbodies, waterbody_notes), source_timings["waterbodies"] = (
+            futures["waterbodies"].result()
+        )
+        try:
+            landcover, source_timings["nlcd"] = futures["nlcd"].result()
+            nlcd_error = None
+        except (requests.RequestException, RuntimeError, ValueError) as exc:
+            landcover = np.full((1, 1), FALLBACK_NLCD_CLASS, dtype=np.uint8)
+            nlcd_error = exc
+            source_timings["nlcd"] = {
+                "elapsed_seconds": perf_counter() - started,
+                "cache": "fallback",
+                "source": "MRLC NLCD",
+                "error": str(exc),
+            }
+        try:
+            (soil_groups, ssurgo_source), source_timings["soils"] = (
+                futures["soils"].result()
+            )
+            soil_error = None
+        except (requests.RequestException, RuntimeError, ValueError, KeyError) as exc:
+            soil_groups = np.full(
+                predicted_dem_shape,
+                ord(FALLBACK_HYDROLOGIC_SOIL_GROUP) - ord("A"),
+                dtype=np.uint8,
+            )
+            soil_error = exc
+            source_timings["soils"] = {
+                "elapsed_seconds": perf_counter() - started,
+                "cache": "fallback",
+                "source": "USDA SSURGO",
+                "error": str(exc),
+            }
+        source_timings["parallel_fetch_wall_seconds"] = perf_counter() - started
+
     dem_sample = _bilinear_sample(
         dem_values,
         dem_bounds,
@@ -1613,17 +1886,6 @@ def build_flood_payload(
         latitude,
         metric_crs,
         dem_nodata,
-    )
-    dem_datum, datum_note = _dem_vertical_datum(
-        session, latitude, longitude, metric_crs
-    )
-    usgs_result = run_usgs(
-        StudyArea(
-            latitude=latitude,
-            longitude=longitude,
-            radius_km=USGS_SEARCH_RADIUS_KM,
-        ),
-        session=session,
     )
     streams = [
         station
@@ -1638,32 +1900,24 @@ def build_flood_payload(
         for observation in usgs_result.latest
         if observation["parameter_code"] == "00065"
     ]
-    latest_daily, daily_errors = _latest_daily_stage(session, streams)
-    groundsource, scan_notes = _groundsource_report(
-        bbox_wgs84,
-        groundsource_parquet,
-        cache_dir,
-    )
-
-    waterbodies, waterbody_notes = _fetch_waterbodies(
+    latest_daily_result, source_timings["usgs_latest_daily"] = _cached_source_job(
+        "USGS latest-daily gage height",
+        _spatial_cache_key(
+            "usgs_latest_daily",
+            tuple(station["station_id"] for station in streams),
+        ),
+        USGS_CACHE_TTL_SECONDS,
         session,
-        analysis_bbox_wgs84,
-        metric_crs,
-        dem_bounds,
+        lambda active_session: _latest_daily_stage(active_session, streams),
     )
+    latest_daily, daily_errors = latest_daily_result
     water_mask = _waterbody_raster_mask(
         waterbodies,
         dem_bounds,
         dem_values.shape,
     )
     source_notes: list[str] = []
-    try:
-        landcover = _fetch_nlcd_landcover(
-            session,
-            dem_bounds,
-            metric_crs,
-            dem_values.shape,
-        )
+    if nlcd_error is None:
         nlcd_source = {
             "source": "MRLC NLCD 2021 Land Cover",
             "url": MRLC_WMS_URL,
@@ -1675,11 +1929,10 @@ def build_flood_payload(
                 "grid; interpolated pixels are estimates, not new observations"
             ),
         }
-    except (requests.RequestException, RuntimeError, ValueError) as exc:
-        landcover = np.full((1, 1), FALLBACK_NLCD_CLASS, dtype=np.uint8)
+    else:
         source_notes.append(
             "NLCD request failed; fallback grassland cover class was used: "
-            f"{exc}"
+            f"{nlcd_error}"
         )
         nlcd_source = {
             "source": "MRLC NLCD 2021 Land Cover",
@@ -1687,14 +1940,9 @@ def build_flood_payload(
             "layer": MRLC_NLCD_LAYER,
             "status": "fallback",
             "fallback_class_code": FALLBACK_NLCD_CLASS,
-            "error": str(exc),
+            "error": str(nlcd_error),
         }
-    try:
-        soil_groups, ssurgo_source = _fetch_ssurgo_hydrologic_soil_grid(
-            session,
-            analysis_bbox_wgs84,
-            dem_values.shape,
-        )
+    if soil_error is None:
         ssurgo_source["status"] = (
             "used"
             if ssurgo_source["samples_with_soil_attributes"]
@@ -1705,23 +1953,20 @@ def build_flood_payload(
                 "SSURGO returned no usable hydrologic soil groups; average "
                 "hydrologic soil group C was used."
             )
-    except (requests.RequestException, RuntimeError, ValueError, KeyError) as exc:
-        soil_groups = np.full(
-            dem_values.shape,
-            ord(FALLBACK_HYDROLOGIC_SOIL_GROUP) - ord("A"),
-            dtype=np.uint8,
-        )
+    else:
         source_notes.append(
             "SSURGO request failed; average hydrologic soil group C was used: "
-            f"{exc}"
+            f"{soil_error}"
         )
         ssurgo_source = {
             "source": "USDA NRCS SSURGO Soil Data Access",
             "url": SSURGO_QUERY_URL,
             "status": "fallback",
             "fallback_group": FALLBACK_HYDROLOGIC_SOIL_GROUP,
-            "error": str(exc),
+            "error": str(soil_error),
         }
+    if soil_groups.shape != dem_values.shape:
+        soil_groups = _resample_continuous_grid(soil_groups, dem_values.shape)
     curve_numbers, curve_number_summary = _curve_number_grid(
         landcover,
         soil_groups,
@@ -1840,12 +2085,24 @@ def build_flood_payload(
         clip_geometry_metric=requested_projected,
         depth_grid_meters=depth_grid,
     )
-    vertical_offset_meters, vertical_conversion = _navd88_to_lmsl_offset(
+    vertical_result, source_timings["vdatum_conversion"] = _cached_source_job(
+        "NOAA VDatum conversion",
+        _spatial_cache_key(
+            "vdatum_conversion",
+            round(latitude, 5),
+            round(longitude, 5),
+            dem_datum,
+        ),
+        VDATUM_CACHE_TTL_SECONDS,
         session,
-        latitude,
-        longitude,
-        dem_datum,
+        lambda active_session: _navd88_to_lmsl_offset(
+            active_session,
+            latitude,
+            longitude,
+            dem_datum,
+        ),
     )
+    vertical_offset_meters, vertical_conversion = vertical_result
     actual_output_datum = (
         "LMSL"
         if vertical_conversion["status"] == "converted"
@@ -1965,6 +2222,25 @@ def build_flood_payload(
             "curve_number_summary": curve_number_summary,
             "contour_thresholds_meters": list(DEPTH_THRESHOLDS_METERS),
             "notes": notes,
+        },
+        "performance": {
+            "parallel_source_fetch_wall_seconds": source_timings[
+                "parallel_fetch_wall_seconds"
+            ],
+            "total_build_seconds": perf_counter() - request_started,
+            "source_timings": source_timings,
+            "post_parallel_fetch_seconds": max(
+                0.0,
+                perf_counter()
+                - request_started
+                - source_timings["parallel_fetch_wall_seconds"],
+            ),
+            "d8_skipped": False,
+            "why_d8_remains_enabled": (
+                "Current direct-observation sources provide no spatially matched "
+                "numeric rainfall-flood depths; event footprints and hazard zones "
+                "cannot substitute for modeled depth."
+            ),
         },
         "dem": {
             "source": THREEDEP_EXPORT_URL,
