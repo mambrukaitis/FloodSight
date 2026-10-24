@@ -1,0 +1,111 @@
+{
+  "status": "insufficient_observations_for_flood_surface",
+  "request": {
+    "latitude": 29.6213568416662,
+    "longitude": -82.3420485546784,
+    "bbox_wgs84_west_south_east_north": [
+      -82.34257085989377,
+      29.620900484734495,
+      -82.34152625406004,
+      29.621813196748032
+    ]
+  },
+  "dem": {
+    "source": "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage",
+    "metric_crs": "EPSG:32617",
+    "raster_shape_rows_columns": [
+      103,
+      103
+    ],
+    "pixel_resolution_meters": [
+      0.9933550735919745,
+      0.9933550735908443
+    ],
+    "sampled_ground_elevation_meters_unconverted": 18.938420277274634,
+    "vertical_datum": "North American Vertical Datum of 1988 (NAVD 88)",
+    "vertical_datum_note": null
+  },
+  "usgs_wdfn_v1": {
+    "status": "success",
+    "endpoint": "https://api.waterdata.usgs.gov/ogcapi/v1/collections",
+    "search_radius_km": 5.0,
+    "nearest_stream_station": {
+      "station_id": "USGS-02240982",
+      "name": "BIVANS ARM AT GAINESVILE,FL",
+      "distance_km": 0.850779308375115,
+      "site_vertical_datum": null
+    },
+    "available_gage_height_observations": [],
+    "latest_daily_gage_height_observations": [
+      {
+        "station_id": "USGS-02240988",
+        "station_name": "SWEETWATER BRANCH AT GAINESVILLE,FL",
+        "distance_km": 2.172750598819357,
+        "value": "2.24",
+        "unit": "ft",
+        "time": "1998-09-29",
+        "age_days": 10252,
+        "approval_status": "Approved",
+        "vertical_datum": null
+      },
+      {
+        "station_id": "USGS-02240976",
+        "station_name": "TUMBLIN CREEK AT GAINESVILLE,FL",
+        "distance_km": 1.4366182276108717,
+        "value": "2.67",
+        "unit": "ft",
+        "time": "1998-09-29",
+        "age_days": 10252,
+        "approval_status": "Approved",
+        "vertical_datum": null
+      },
+      {
+        "station_id": "USGS-02240982",
+        "station_name": "BIVANS ARM AT GAINESVILE,FL",
+        "distance_km": 0.850779308375115,
+        "value": "4.29",
+        "unit": "ft",
+        "time": "1998-09-29",
+        "age_days": 10252,
+        "approval_status": "Approved",
+        "vertical_datum": null
+      }
+    ],
+    "errors": [],
+    "reference_station": {
+      "station_id": "USGS-02240980",
+      "name": "BIVANS ARM NR GAINESVILLE, FLA.",
+      "latitude": 29.6213568416662,
+      "longitude": -82.3420485546784,
+      "site_type": "Lake, Reservoir, Impoundment"
+    }
+  },
+  "groundsource": {
+    "source": "https://zenodo.org/records/18647054",
+    "records_scanned": 2646302,
+    "malformed_records": 0,
+    "historical_footprints_intersecting_bbox": 10,
+    "event_date_range": [
+      "2014-04-29",
+      "2024-09-27"
+    ],
+    "available_fields": [
+      "area_km2",
+      "end_date",
+      "geometry",
+      "start_date",
+      "uuid"
+    ],
+    "notes": [
+      "Groundsource full archive scan completed; required schema: ['area_km2', 'end_date', 'geometry', 'start_date', 'uuid']."
+    ]
+  },
+  "withheld_output_reasons": [
+    "No current USGS WDFN gage-height observation (parameter 00065) was returned for a stream station within the 5 km search radius. Latest daily value was 2.24 ft at SWEETWATER BRANCH AT GAINESVILLE,FL on 1998-09-29.",
+    "A streamgage stage is local to its gauge; it is not a spatial water surface. No verified gage-datum elevation or hydraulic model connects it to this box.",
+    "The 3DEP elevation is referenced to North American Vertical Datum of 1988 (NAVD 88), not verified MSL; no vertical-datum conversion was applied.",
+    "Groundsource contributes historical event footprints only; it does not contain point water levels or depth measurements."
+  ],
+  "interpretation": "Null AR fields mean unknown, not dry. No depth raster or contours were emitted because the available sources do not establish a local water-surface elevation in a verified common vertical datum.",
+  "location_label": "Bivens Arm (USGS-02240980, BIVANS ARM NR GAINESVILLE, FLA.)"
+}

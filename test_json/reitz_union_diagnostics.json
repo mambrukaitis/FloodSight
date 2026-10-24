@@ -1,0 +1,114 @@
+{
+  "status": "insufficient_observations_for_flood_surface",
+  "request": {
+    "latitude": 29.64489,
+    "longitude": -82.34834,
+    "bbox_wgs84_west_south_east_north": [
+      -82.34886245767863,
+      29.644433617580138,
+      -82.34781754692378,
+      29.645346380569016
+    ]
+  },
+  "dem": {
+    "source": "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage",
+    "metric_crs": "EPSG:32617",
+    "raster_shape_rows_columns": [
+      103,
+      103
+    ],
+    "pixel_resolution_meters": [
+      0.9934767854368333,
+      0.9934767854345727
+    ],
+    "sampled_ground_elevation_meters_unconverted": 34.822083758500355,
+    "vertical_datum": "North American Vertical Datum of 1988 (NAVD 88)",
+    "vertical_datum_note": null
+  },
+  "usgs_wdfn_v1": {
+    "status": "success",
+    "endpoint": "https://api.waterdata.usgs.gov/ogcapi/v1/collections",
+    "search_radius_km": 5.0,
+    "nearest_stream_station": {
+      "station_id": "USGS-02240976",
+      "name": "TUMBLIN CREEK AT GAINESVILLE,FL",
+      "distance_km": 1.4646647205802457,
+      "site_vertical_datum": null
+    },
+    "available_gage_height_observations": [],
+    "latest_daily_gage_height_observations": [
+      {
+        "station_id": "USGS-02240954",
+        "station_name": "HOGTOWN CREEK NEAR ARREDONDO, FL",
+        "distance_km": 4.320809854906858,
+        "value": "56.55",
+        "unit": "ft",
+        "time": "2002-09-30",
+        "age_days": 8790,
+        "approval_status": "Approved",
+        "vertical_datum": null
+      },
+      {
+        "station_id": "USGS-02240982",
+        "station_name": "BIVANS ARM AT GAINESVILE,FL",
+        "distance_km": 3.401992185242069,
+        "value": "4.29",
+        "unit": "ft",
+        "time": "1998-09-29",
+        "age_days": 10252,
+        "approval_status": "Approved",
+        "vertical_datum": null
+      },
+      {
+        "station_id": "USGS-02240988",
+        "station_name": "SWEETWATER BRANCH AT GAINESVILLE,FL",
+        "distance_km": 3.0188500521144825,
+        "value": "2.24",
+        "unit": "ft",
+        "time": "1998-09-29",
+        "age_days": 10252,
+        "approval_status": "Approved",
+        "vertical_datum": null
+      },
+      {
+        "station_id": "USGS-02240976",
+        "station_name": "TUMBLIN CREEK AT GAINESVILLE,FL",
+        "distance_km": 1.4646647205802457,
+        "value": "2.67",
+        "unit": "ft",
+        "time": "1998-09-29",
+        "age_days": 10252,
+        "approval_status": "Approved",
+        "vertical_datum": null
+      }
+    ],
+    "errors": []
+  },
+  "groundsource": {
+    "source": "https://zenodo.org/records/18647054",
+    "records_scanned": 2646302,
+    "malformed_records": 0,
+    "historical_footprints_intersecting_bbox": 25,
+    "event_date_range": [
+      "2014-04-29",
+      "2024-09-27"
+    ],
+    "available_fields": [
+      "area_km2",
+      "end_date",
+      "geometry",
+      "start_date",
+      "uuid"
+    ],
+    "notes": [
+      "Groundsource scan cache hit: C:\\Users\\mihir\\Gatorhacks\\FloodSight\\test_json\\cache\\groundsource_0c6df2d31ccb046a.json"
+    ]
+  },
+  "withheld_output_reasons": [
+    "No current USGS WDFN gage-height observation (parameter 00065) was returned for a stream station within the 5 km search radius. Latest daily value was 56.55 ft at HOGTOWN CREEK NEAR ARREDONDO, FL on 2002-09-30.",
+    "A streamgage stage is local to its gauge; it is not a spatial water surface. No verified gage-datum elevation or hydraulic model connects it to this box.",
+    "The 3DEP elevation is referenced to North American Vertical Datum of 1988 (NAVD 88), not verified MSL; no vertical-datum conversion was applied.",
+    "Groundsource contributes historical event footprints only; it does not contain point water levels or depth measurements."
+  ],
+  "interpretation": "Null AR fields mean unknown, not dry. No depth raster or contours were emitted because the available sources do not establish a local water-surface elevation in a verified common vertical datum."
+}

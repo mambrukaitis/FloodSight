@@ -1,0 +1,9 @@
+{
+  "ar_flood_data": {
+    "ground_elevation_msl_meters": null,
+    "water_surface_msl_meters": null,
+    "water_depth_meters": null,
+    "is_flooded": null
+  },
+  "map_contours": []
+}
