@@ -1651,12 +1651,26 @@ def build_flood_payload(
     if retained_water_fraction is None:
         runoff_depth_grid = _scs_runoff_depth_grid(rainfall_inches, curve_numbers)
 
-        # Safely fetch groundsource historical event count for this bounding box
+        # Safely fetch groundsource historical event count with a surrounding area buffer (~1.5 km expansion)
         try:
             from flood_heartbeat.groundsource import scan_groundsource_box
             GROUND_SOURCE_PATH = Path(__file__).parent / ".cache" / "groundsource" / "groundsource_2026.parquet"
+            
             if GROUND_SOURCE_PATH.exists():
-                groundsource = scan_groundsource_box(GROUND_SOURCE_PATH, [{"id": "bbox", "geometry": box(*analysis_bbox_wgs84)}], Path(__file__).parent / ".cache" / "groundsource" / "scan.json")
+                # Create a slightly larger search box for historical context (buffer by ~0.015 degrees ~ 1.5km)
+                buffer_deg = 0.015
+                buffered_bbox = (
+                    analysis_bbox_wgs84[0] - buffer_deg,
+                    analysis_bbox_wgs84[1] - buffer_deg,
+                    analysis_bbox_wgs84[2] + buffer_deg,
+                    analysis_bbox_wgs84[3] + buffer_deg,
+                )
+                
+                groundsource = scan_groundsource_box(
+                    GROUND_SOURCE_PATH, 
+                    [{"id": "buffered_bbox", "geometry": box(*buffered_bbox)}], 
+                    Path(__file__).parent / ".cache" / "groundsource" / "scan.json"
+                )
             else:
                 groundsource = {"events_intersecting_area": 0}
         except Exception:
