@@ -12,7 +12,7 @@ import numpy as np
 from pyproj import Transformer
 from shapely.geometry import Point, Polygon, box, shape
 
-from test_json.service import (
+from service import (
     _curve_number_grid,
     _decode_nlcd_values,
     _solve_d8_catchment_ponding,
