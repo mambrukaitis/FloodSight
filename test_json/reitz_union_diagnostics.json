@@ -1,5 +1,5 @@
 {
-  "status": "insufficient_observations_for_flood_surface",
+  "status": "illustrative_rainfall_retention_estimate",
   "request": {
     "latitude": 29.64489,
     "longitude": -82.34834,
@@ -8,6 +8,31 @@
       29.644433617580138,
       -82.34781754692378,
       29.645346380569016
+    ],
+    "rainfall_inches": 10.0
+  },
+  "model": {
+    "method": "closed-box bathtub redistribution over the 3DEP elevation raster",
+    "retained_water_fraction": 0.02,
+    "effective_rainfall_inches": 0.2,
+    "effective_runoff_volume_m3": 53.19289270480787,
+    "modeled_water_surface_native_datum_meters": 31.30521647142097,
+    "point_depth_meters_unrounded": 0.0,
+    "maximum_grid_depth_meters": 0.7892862956397195,
+    "pixel_area_m2": 0.9869961231996579,
+    "contour_thresholds_meters": [
+      0.3,
+      1.0
+    ],
+    "notes": [
+      "This is a scenario estimate, not an observed or calibrated flood forecast.",
+      "The user-specified retained-water fraction is applied uniformly to rainfall volume; no drainage, infiltration, boundary flow, or upstream inflow is modeled.",
+      "3DEP elevation is used in its native vertical datum for relative raster math. The payload's MSL-named absolute-elevation fields use that value as an approximation; no NAVD88-to-local-mean-sea-level correction was applied.",
+      "USGS gage stage is reported as context only and is not transferred from a distant gage to the local flood surface.",
+      "Groundsource footprint counts are historical context only and do not determine the scenario depth.",
+      "Contour rings contain exteriors only because the required payload format cannot encode polygon holes.",
+      "No current local WDFN gage-height observation is available; the most recent daily stage is historical and is not used to compute this estimate.",
+      "Groundsource has historical event footprints in this box but no point water-level or depth observations."
     ]
   },
   "dem": {
@@ -23,7 +48,8 @@
     ],
     "sampled_ground_elevation_meters_unconverted": 34.822083758500355,
     "vertical_datum": "North American Vertical Datum of 1988 (NAVD 88)",
-    "vertical_datum_note": null
+    "vertical_datum_note": null,
+    "payload_absolute_elevation_datum_approximation": "Native DEM datum treated as local MSL for this illustrative payload; not a surveyed MSL conversion."
   },
   "usgs_wdfn_v1": {
     "status": "success",
@@ -84,6 +110,11 @@
     ],
     "errors": []
   },
+  "data_source_roles": {
+    "usgs_wdfn_v1": "Live/cached station and gage observations provide context; unavailable/stale gage data is not extrapolated to the bbox.",
+    "usgs_3dep": "Supplies the elevation raster used for terrain and bathtub raster math.",
+    "groundsource": "Historical event-footprint context only; no depth values are present."
+  },
   "groundsource": {
     "source": "https://zenodo.org/records/18647054",
     "records_scanned": 2646302,
@@ -104,11 +135,5 @@
       "Groundsource scan cache hit: C:\\Users\\mihir\\Gatorhacks\\FloodSight\\test_json\\cache\\groundsource_0c6df2d31ccb046a.json"
     ]
   },
-  "withheld_output_reasons": [
-    "No current USGS WDFN gage-height observation (parameter 00065) was returned for a stream station within the 5 km search radius. Latest daily value was 56.55 ft at HOGTOWN CREEK NEAR ARREDONDO, FL on 2002-09-30.",
-    "A streamgage stage is local to its gauge; it is not a spatial water surface. No verified gage-datum elevation or hydraulic model connects it to this box.",
-    "The 3DEP elevation is referenced to North American Vertical Datum of 1988 (NAVD 88), not verified MSL; no vertical-datum conversion was applied.",
-    "Groundsource contributes historical event footprints only; it does not contain point water levels or depth measurements."
-  ],
-  "interpretation": "Null AR fields mean unknown, not dry. No depth raster or contours were emitted because the available sources do not establish a local water-surface elevation in a verified common vertical datum."
+  "interpretation": "Numeric values are generated from the specified rainfall and retained-water fraction using a simplified closed-box terrain model. They are not observed, calibrated, or suitable for life-safety decisions."
 }

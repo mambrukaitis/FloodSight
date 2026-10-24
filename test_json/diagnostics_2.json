@@ -1,5 +1,5 @@
 {
-  "status": "insufficient_observations_for_flood_surface",
+  "status": "illustrative_rainfall_retention_estimate",
   "request": {
     "latitude": 29.6213568416662,
     "longitude": -82.3420485546784,
@@ -8,6 +8,31 @@
       29.620900484734495,
       -82.34152625406004,
       29.621813196748032
+    ],
+    "rainfall_inches": 10
+  },
+  "model": {
+    "method": "closed-box bathtub redistribution over the 3DEP elevation raster",
+    "retained_water_fraction": 0.02,
+    "effective_rainfall_inches": 0.2,
+    "effective_runoff_volume_m3": 53.179860073167916,
+    "modeled_water_surface_native_datum_meters": 18.89023188612763,
+    "point_depth_meters_unrounded": 0.0,
+    "maximum_grid_depth_meters": 0.011792936542668997,
+    "pixel_area_m2": 0.9867543022297944,
+    "contour_thresholds_meters": [
+      0.3,
+      1.0
+    ],
+    "notes": [
+      "This is a scenario estimate, not an observed or calibrated flood forecast.",
+      "The user-specified retained-water fraction is applied uniformly to rainfall volume; no drainage, infiltration, boundary flow, or upstream inflow is modeled.",
+      "3DEP elevation is used in its native vertical datum for relative raster math. The payload's MSL-named absolute-elevation fields use that value as an approximation; no NAVD88-to-local-mean-sea-level correction was applied.",
+      "USGS gage stage is reported as context only and is not transferred from a distant gage to the local flood surface.",
+      "Groundsource footprint counts are historical context only and do not determine the scenario depth.",
+      "Contour rings contain exteriors only because the required payload format cannot encode polygon holes.",
+      "No current local WDFN gage-height observation is available; the most recent daily stage is historical and is not used to compute this estimate.",
+      "Groundsource has historical event footprints in this box but no point water-level or depth observations."
     ]
   },
   "dem": {
@@ -23,7 +48,8 @@
     ],
     "sampled_ground_elevation_meters_unconverted": 18.938420277274634,
     "vertical_datum": "North American Vertical Datum of 1988 (NAVD 88)",
-    "vertical_datum_note": null
+    "vertical_datum_note": null,
+    "payload_absolute_elevation_datum_approximation": "Native DEM datum treated as local MSL for this illustrative payload; not a surveyed MSL conversion."
   },
   "usgs_wdfn_v1": {
     "status": "success",
@@ -71,14 +97,12 @@
         "vertical_datum": null
       }
     ],
-    "errors": [],
-    "reference_station": {
-      "station_id": "USGS-02240980",
-      "name": "BIVANS ARM NR GAINESVILLE, FLA.",
-      "latitude": 29.6213568416662,
-      "longitude": -82.3420485546784,
-      "site_type": "Lake, Reservoir, Impoundment"
-    }
+    "errors": []
+  },
+  "data_source_roles": {
+    "usgs_wdfn_v1": "Live/cached station and gage observations provide context; unavailable/stale gage data is not extrapolated to the bbox.",
+    "usgs_3dep": "Supplies the elevation raster used for terrain and bathtub raster math.",
+    "groundsource": "Historical event-footprint context only; no depth values are present."
   },
   "groundsource": {
     "source": "https://zenodo.org/records/18647054",
@@ -97,15 +121,9 @@
       "uuid"
     ],
     "notes": [
-      "Groundsource full archive scan completed; required schema: ['area_km2', 'end_date', 'geometry', 'start_date', 'uuid']."
+      "Groundsource scan cache hit: C:\\Users\\mihir\\Gatorhacks\\FloodSight\\test_json\\cache\\groundsource_3a2ac1be208db593.json"
     ]
   },
-  "withheld_output_reasons": [
-    "No current USGS WDFN gage-height observation (parameter 00065) was returned for a stream station within the 5 km search radius. Latest daily value was 2.24 ft at SWEETWATER BRANCH AT GAINESVILLE,FL on 1998-09-29.",
-    "A streamgage stage is local to its gauge; it is not a spatial water surface. No verified gage-datum elevation or hydraulic model connects it to this box.",
-    "The 3DEP elevation is referenced to North American Vertical Datum of 1988 (NAVD 88), not verified MSL; no vertical-datum conversion was applied.",
-    "Groundsource contributes historical event footprints only; it does not contain point water levels or depth measurements."
-  ],
-  "interpretation": "Null AR fields mean unknown, not dry. No depth raster or contours were emitted because the available sources do not establish a local water-surface elevation in a verified common vertical datum.",
-  "location_label": "Bivens Arm (USGS-02240980, BIVANS ARM NR GAINESVILLE, FLA.)"
+  "interpretation": "Numeric values are generated from the specified rainfall and retained-water fraction using a simplified closed-box terrain model. They are not observed, calibrated, or suitable for life-safety decisions.",
+  "location_label": "Bivens Arm (USGS-02240980; lake/impoundment monitoring location)"
 }

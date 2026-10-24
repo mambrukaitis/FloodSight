@@ -13,6 +13,7 @@ from shapely.geometry import shape
 
 from test_json.service import (
     _latest_daily_stage,
+    _solve_retained_rainfall_surface,
     _validate_request,
     build_flood_payload,
     create_request_handler,
@@ -70,6 +71,18 @@ class FloodPayloadTests(unittest.TestCase):
         )
         self.assertTrue(less_deep.covers(deeper))
 
+    def test_retained_rainfall_solver_uses_explicit_volume_fraction(self) -> None:
+        level, depths, pixel_area = _solve_retained_rainfall_surface(
+            np.full((10, 10), 10.0),
+            (0.0, 0.0, 10.0, 10.0),
+            rainfall_inches=10,
+            retained_water_fraction=0.02,
+            nodata=None,
+        )
+        self.assertAlmostEqual(pixel_area, 1.0)
+        self.assertAlmostEqual(level - 10.0, 0.00508, places=8)
+        self.assertTrue(np.allclose(depths, 0.00508))
+
     def test_contour_rejects_nonfinite_surface(self) -> None:
         with self.assertRaisesRegex(ValueError, "finite"):
             vectorize_depth_thresholds(
@@ -104,7 +117,7 @@ class FloodPayloadTests(unittest.TestCase):
         self.assertEqual(observations[0]["time"], "1998-09-29")
         self.assertGreater(observations[0]["age_days"], 7)
 
-    def test_payload_keeps_unknown_values_null_and_reports_datum(self) -> None:
+    def test_payload_emits_numeric_assumption_based_payload(self) -> None:
         bbox = (-82.35, 29.64, -82.34, 29.65)
         usgs = SimpleNamespace(
             status="success",
@@ -122,7 +135,7 @@ class FloodPayloadTests(unittest.TestCase):
         with (
             patch(
                 "test_json.service._fetch_dem",
-                return_value=(np.ones((2, 2)), (0, 0, 2, 2), None, 32617),
+                return_value=(np.full((2, 2), 34.8), (0, 0, 2, 2), None, 32617),
             ),
             patch("test_json.service._bilinear_sample", return_value=34.8),
             patch(
@@ -144,20 +157,26 @@ class FloodPayloadTests(unittest.TestCase):
         self.assertEqual(
             payload["ar_flood_data"],
             {
-                "ground_elevation_msl_meters": None,
-                "water_surface_msl_meters": None,
-                "water_depth_meters": None,
-                "is_flooded": None,
+                "ground_elevation_msl_meters": 34.8,
+                "water_surface_msl_meters": 34.805,
+                "water_depth_meters": 0.005,
+                "is_flooded": True,
             },
         )
         self.assertEqual(payload["map_contours"], [])
         self.assertEqual(
+            diagnostics["status"],
+            "illustrative_rainfall_retention_estimate",
+        )
+        self.assertEqual(
             diagnostics["dem"]["sampled_ground_elevation_meters_unconverted"],
             34.8,
         )
-        self.assertTrue(
-            any("not verified MSL" in reason for reason in diagnostics["withheld_output_reasons"])
+        self.assertEqual(
+            diagnostics["model"]["effective_rainfall_inches"],
+            0.2,
         )
+        self.assertTrue(diagnostics["model"]["notes"])
 
 
 class FloodHttpServiceTests(unittest.TestCase):
@@ -174,10 +193,10 @@ class FloodHttpServiceTests(unittest.TestCase):
     def test_post_returns_only_payload(self) -> None:
         payload = {
             "ar_flood_data": {
-                "ground_elevation_msl_meters": None,
-                "water_surface_msl_meters": None,
-                "water_depth_meters": None,
-                "is_flooded": None,
+                "ground_elevation_msl_meters": 34.8,
+                "water_surface_msl_meters": 34.805,
+                "water_depth_meters": 0.005,
+                "is_flooded": True,
             },
             "map_contours": [],
         }
@@ -185,6 +204,8 @@ class FloodHttpServiceTests(unittest.TestCase):
             "latitude": 29.645,
             "longitude": -82.345,
             "bbox_wgs84": [-82.35, 29.64, -82.34, 29.65],
+            "rainfall_inches": 5,
+            "retained_water_fraction": 0.1,
         }
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
         try:
@@ -206,6 +227,8 @@ class FloodHttpServiceTests(unittest.TestCase):
                 29.645,
                 -82.345,
                 (-82.35, 29.64, -82.34, 29.65),
+                rainfall_inches=5,
+                retained_water_fraction=0.1,
             )
         finally:
             connection.close()

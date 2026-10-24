@@ -6,6 +6,12 @@ Run from the FloodSight workspace root:
 .\.venv\Scripts\python.exe -m test_json.service
 ```
 
+Override the 10-inch demo rainfall assumption or retained-water fraction:
+
+```powershell
+.\.venv\Scripts\python.exe -m test_json.service --rainfall-inches 10 --retained-water-fraction 0.02
+```
+
 To run the HTTP microservice locally:
 
 ```powershell
@@ -13,11 +19,14 @@ To run the HTTP microservice locally:
 ```
 
 Send a POST to `http://127.0.0.1:8000/flood` with JSON containing
-`latitude`, `longitude`, and `bbox_wgs84: [west, south, east, north]`. A valid
-request returns only the iOS payload; malformed requests return HTTP 400 and
-failed upstream/data requests return HTTP 503 with an `error` field.
+`latitude`, `longitude`, `bbox_wgs84: [west, south, east, north]`, and
+optionally `rainfall_inches` and `retained_water_fraction`. Defaults are 10
+inches of rain and 0.02 retained. A valid request returns only the iOS payload;
+malformed requests return HTTP 400 and failed upstream/data requests return
+HTTP 503 with an `error` field.
 
-The service function is `build_flood_payload(latitude, longitude, bbox_wgs84)`.
+The service function is `build_flood_payload(latitude, longitude, bbox_wgs84,
+rainfall_inches=10, retained_water_fraction=0.02)`.
 The bounding box is `(west, south, east, north)` in EPSG:4326. The example uses
 the existing Reitz Union Drive coordinate and a 100 m by 100 m projected box.
 It requests the local DEM from USGS 3DEP, queries nearby stream observations
@@ -35,21 +44,40 @@ Run the service tests with:
 .\.venv\Scripts\python.exe -m unittest test_json.test_service -v
 ```
 
-**A null value is unknown, not dry.** The Swift model should make the AR values
-optional so unavailable measurements are distinct from a confirmed dry result.
-On the verified Reitz run, the 3DEP tile
-reported NAVD 88 rather than MSL, no WDFN gage-height observation was available
-from a stream station within 5 km, and the closest streamgage was 1.465 km away
-with no vertical datum in its station metadata. Groundsource contains
-historical event footprints without water depths. Consequently the output
-leaves MSL elevations, depth, and flooded state null, and emits no contours. It
-does not substitute gage stage for a site-wide water-surface elevation or
-invent depth contours. WDFN's latest daily gage-height value for that nearby
-station is 2.67 ft from 1998-09-29, so it is historical evidence, not current
-water level.
+## Interpretation and limitations
 
-`vectorize_depth_thresholds(...)` is provided for later use when a validated
-water-surface elevation and DEM share a known vertical datum. It treats water
-surface as a constant plane; it is a terrain-screening calculation, not a
-hydraulic flood model, and the current payload builder does not call it without
-validated inputs.
+The payload is numeric and uses the exact two top-level keys required by the
+Swift shape. Its values are an **illustrative scenario**, not observed water
+levels or a calibrated forecast:
+
+- 3DEP supplies the elevation raster. This Reitz sample is NAVD 88. The
+  payload's MSL-named fields use the DEM's native datum as an explicit local
+  approximation; the service does not apply a NAVD 88 to local mean-sea-level
+  conversion. Depth arithmetic is internally consistent because it subtracts
+  elevations in the same DEM datum, but absolute AR altitude can be offset.
+- `retained_water_fraction` defaults to 0.02. With 10 inches of rain, this
+  retains the equivalent of 0.2 inches over the box, then redistributes it over
+  low DEM cells as a closed-basin “bathtub.” This 2% is a transparent demo
+  assumption (matching the illustrative example), **not** a coefficient
+  measured by WDFN, Groundsource, soils, or land cover.
+- WDFN and Groundsource do not numerically set the runoff fraction: current
+  local gage heights and pointwise historical depths are not available. They
+  are queried and included in diagnostics, but cannot scientifically calibrate
+  this scenario. NLCD and SSURGO are not yet wired into this service's runoff
+  calculation.
+- USGS WDFN v1 is queried for nearby stations and gage heights. At Reitz, the
+  closest streamgage has no current stage reading; its latest daily value is
+  historical. A gage-stage observation is not assigned across the bounding
+  box because no gage-datum/elevation tie or hydraulic connection is available.
+- Groundsource is scanned for local historical event footprints. It contains no
+  point depth values, so event overlap is diagnostic context, not calibration.
+- No storm duration, infiltration, storm-drain capacity, boundary flow, or
+  runoff from outside the box is modeled. Contours are generated from DEM
+  raster math at 0.3 m and 1.0 m; the required single-ring coordinate format
+  cannot represent holes and therefore emits polygon exteriors only.
+
+Use the output for a demo visualization only, not safety decisions. A
+scientifically defensible prediction needs event rainfall timing, local
+hydraulic/drainage data, and observed depths for calibration. The output schema
+has no confidence/provenance fields, so the returned JSON itself cannot convey
+these caveats; see the generated diagnostics JSON and this README.

@@ -31,6 +31,8 @@ DEFAULT_BBOX_SIDE_METERS = 100.0
 USGS_SEARCH_RADIUS_KM = 5.0
 MAX_DEM_PIXELS = 250_000
 DEPTH_THRESHOLDS_METERS = (0.3, 1.0)
+DEFAULT_RAINFALL_INCHES = 10.0
+DEFAULT_RETAINED_WATER_FRACTION = 0.02
 
 
 def reitz_bbox(side_meters: float = DEFAULT_BBOX_SIDE_METERS) -> tuple[float, float, float, float]:
@@ -232,10 +234,8 @@ def vectorize_depth_thresholds(
         dissolved = unary_union(pixels)
         polygons = [dissolved] if dissolved.geom_type == "Polygon" else list(dissolved.geoms)
         for polygon in polygons:
-            if polygon.geom_type != "Polygon" or polygon.interiors:
-                raise ValueError(
-                    "Output schema cannot represent contour holes or non-polygon parts."
-                )
+            if polygon.geom_type != "Polygon":
+                continue
             geographic = transform(
                 polygon,
                 forward.transform,
@@ -252,6 +252,49 @@ def vectorize_depth_thresholds(
                 }
             )
     return contours
+
+
+def _solve_retained_rainfall_surface(
+    elevation_grid_meters: np.ndarray,
+    bounds_metric: tuple[float, float, float, float],
+    rainfall_inches: float,
+    retained_water_fraction: float,
+    nodata: float | None,
+) -> tuple[float, np.ndarray, float]:
+    values = np.asarray(elevation_grid_meters, dtype=float)
+    if values.ndim != 2:
+        raise ValueError("Elevation grid must be two-dimensional.")
+    if not math.isfinite(rainfall_inches) or rainfall_inches < 0:
+        raise ValueError("Rainfall must be finite and non-negative.")
+    if (
+        not math.isfinite(retained_water_fraction)
+        or not 0 <= retained_water_fraction <= 1
+    ):
+        raise ValueError("Retained-water fraction must be between 0 and 1.")
+    valid = np.isfinite(values)
+    if nodata is not None:
+        valid &= values != nodata
+    elevations = values[valid]
+    if elevations.size == 0:
+        raise ValueError("DEM has no valid elevation pixels in the requested box.")
+    xmin, ymin, xmax, ymax = bounds_metric
+    pixel_area_m2 = (xmax - xmin) * (ymax - ymin) / elevations.size
+    target_volume_m3 = (
+        rainfall_inches * 0.0254 * retained_water_fraction * pixel_area_m2 * elevations.size
+    )
+    low = float(np.min(elevations))
+    high = float(np.max(elevations) + target_volume_m3 / pixel_area_m2 + 1)
+    for _ in range(80):
+        level = (low + high) / 2
+        volume = float(np.maximum(level - elevations, 0).sum() * pixel_area_m2)
+        if volume < target_volume_m3:
+            low = level
+        else:
+            high = level
+    surface = (low + high) / 2
+    depth_grid = np.full(values.shape, np.nan, dtype=float)
+    depth_grid[valid] = np.maximum(surface - values[valid], 0)
+    return surface, depth_grid, pixel_area_m2
 
 
 def _dem_vertical_datum(
@@ -398,17 +441,25 @@ def build_flood_payload(
     longitude: float,
     bbox_wgs84: tuple[float, float, float, float],
     *,
+    rainfall_inches: float = DEFAULT_RAINFALL_INCHES,
+    retained_water_fraction: float = DEFAULT_RETAINED_WATER_FRACTION,
     groundsource_parquet: Path = GROUND_SOURCE_PATH,
     cache_dir: Path = Path(__file__).parent / "cache",
     session: requests.Session | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Build the iOS payload and a separate evidence/availability report.
+    """Build an explicitly illustrative rain-retention estimate and diagnostics.
 
-    Unknown MSL elevations and flood state are JSON null, not guessed values or
-    false/dry results. Groundsource and USGS observations are supporting evidence;
-    neither is treated as a spatial depth raster.
+    The requested schema has no field for uncertainty or provenance, so those
+    details are returned in diagnostics and documented alongside the payload.
     """
     _validate_request(latitude, longitude, bbox_wgs84)
+    if not math.isfinite(rainfall_inches) or rainfall_inches < 0:
+        raise ValueError("Rainfall must be finite and non-negative.")
+    if (
+        not math.isfinite(retained_water_fraction)
+        or not 0 <= retained_water_fraction <= 1
+    ):
+        raise ValueError("Retained-water fraction must be between 0 and 1.")
     session = session or requests.Session()
     dem_values, dem_bounds, dem_nodata, metric_crs = _fetch_dem(
         session, latitude, longitude, bbox_wgs84
@@ -452,7 +503,45 @@ def build_flood_payload(
         cache_dir,
     )
 
-    reasons = []
+    water_surface_datum, depth_grid, pixel_area_m2 = _solve_retained_rainfall_surface(
+        dem_values,
+        dem_bounds,
+        rainfall_inches,
+        retained_water_fraction,
+        dem_nodata,
+    )
+    point_depth = max(water_surface_datum - dem_sample, 0.0)
+    if rainfall_inches == 0 or retained_water_fraction == 0:
+        point_depth = 0.0
+    water_surface_for_output = water_surface_datum
+    contours = vectorize_depth_thresholds(
+        dem_values,
+        dem_bounds,
+        metric_crs,
+        water_surface_datum,
+        nodata=dem_nodata,
+    )
+    ground_elevation_output = round(dem_sample, 3)
+    water_surface_output = round(water_surface_for_output, 3)
+    water_depth_output = round(
+        max(water_surface_output - ground_elevation_output, 0.0),
+        3,
+    )
+
+    notes = [
+        "This is a scenario estimate, not an observed or calibrated flood forecast.",
+        "The user-specified retained-water fraction is applied uniformly to rainfall "
+        "volume; no drainage, infiltration, boundary flow, or upstream inflow is modeled.",
+        "3DEP elevation is used in its native vertical datum for relative raster math. "
+        "The payload's MSL-named absolute-elevation fields use that value as an "
+        "approximation; no NAVD88-to-local-mean-sea-level correction was applied.",
+        "USGS gage stage is reported as context only and is not transferred from a "
+        "distant gage to the local flood surface.",
+        "Groundsource footprint counts are historical context only and do not determine "
+        "the scenario depth.",
+        "Contour rings contain exteriors only because the required payload format "
+        "cannot encode polygon holes.",
+    ]
     recent_daily = [
         observation
         for observation in latest_daily
@@ -460,55 +549,50 @@ def build_flood_payload(
         and 0 <= observation["age_days"] <= 7
     ]
     if not stage_observations and not recent_daily:
-        latest_daily_note = (
-            " Latest daily value was "
-            f"{latest_daily[0]['value']} {latest_daily[0]['unit']} at "
-            f"{latest_daily[0]['station_name']} on {latest_daily[0]['time']}."
-            if latest_daily
-            else ""
-        )
-        reasons.append(
-            "No current USGS WDFN gage-height observation (parameter 00065) was "
-            "returned for a stream station within the 5 km search radius."
-            + latest_daily_note
-        )
-    reasons.append(
-        "A streamgage stage is local to its gauge; it is not a spatial water surface. "
-        "No verified gage-datum elevation or hydraulic model connects it to this box."
-    )
-    is_dem_msl = bool(
-        dem_datum
-        and (
-            dem_datum.strip().lower() == "msl"
-            or "mean sea level" in dem_datum.strip().lower()
-        )
-    )
-    if not is_dem_msl:
-        reasons.append(
-            f"The 3DEP elevation is referenced to {dem_datum or 'an unknown datum'}, "
-            "not verified MSL; no vertical-datum conversion was applied."
+        notes.append(
+            "No current local WDFN gage-height observation is available; the most "
+            "recent daily stage is historical and is not used to compute this estimate."
         )
     if groundsource.get("events_intersecting_area", 0):
-        reasons.append(
-            "Groundsource contributes historical event footprints only; it does not "
-            "contain point water levels or depth measurements."
+        notes.append(
+            "Groundsource has historical event footprints in this box but no "
+            "point water-level or depth observations."
         )
 
     payload = {
         "ar_flood_data": {
-            "ground_elevation_msl_meters": dem_sample if is_dem_msl else None,
-            "water_surface_msl_meters": None,
-            "water_depth_meters": None,
-            "is_flooded": None,
+            "ground_elevation_msl_meters": ground_elevation_output,
+            "water_surface_msl_meters": water_surface_output,
+            "water_depth_meters": water_depth_output,
+            "is_flooded": water_depth_output > 0,
         },
-        "map_contours": [],
+        "map_contours": contours,
     }
     diagnostics = {
-        "status": "insufficient_observations_for_flood_surface",
+        "status": "illustrative_rainfall_retention_estimate",
         "request": {
             "latitude": latitude,
             "longitude": longitude,
             "bbox_wgs84_west_south_east_north": list(bbox_wgs84),
+            "rainfall_inches": rainfall_inches,
+        },
+        "model": {
+            "method": "closed-box bathtub redistribution over the 3DEP elevation raster",
+            "retained_water_fraction": retained_water_fraction,
+            "effective_rainfall_inches": rainfall_inches * retained_water_fraction,
+            "effective_runoff_volume_m3": (
+                rainfall_inches
+                * 0.0254
+                * retained_water_fraction
+                * (dem_bounds[2] - dem_bounds[0])
+                * (dem_bounds[3] - dem_bounds[1])
+            ),
+            "modeled_water_surface_native_datum_meters": water_surface_datum,
+            "point_depth_meters_unrounded": point_depth,
+            "maximum_grid_depth_meters": float(np.nanmax(depth_grid)),
+            "pixel_area_m2": pixel_area_m2,
+            "contour_thresholds_meters": list(DEPTH_THRESHOLDS_METERS),
+            "notes": notes,
         },
         "dem": {
             "source": THREEDEP_EXPORT_URL,
@@ -521,6 +605,10 @@ def build_flood_payload(
             "sampled_ground_elevation_meters_unconverted": dem_sample,
             "vertical_datum": dem_datum,
             "vertical_datum_note": datum_note,
+            "payload_absolute_elevation_datum_approximation": (
+                "Native DEM datum treated as local MSL for this illustrative payload; "
+                "not a surveyed MSL conversion."
+            ),
         },
         "usgs_wdfn_v1": {
             "status": usgs_result.status,
@@ -543,6 +631,11 @@ def build_flood_payload(
             "latest_daily_gage_height_observations": latest_daily,
             "errors": usgs_result.errors + daily_errors,
         },
+        "data_source_roles": {
+            "usgs_wdfn_v1": "Live/cached station and gage observations provide context; unavailable/stale gage data is not extrapolated to the bbox.",
+            "usgs_3dep": "Supplies the elevation raster used for terrain and bathtub raster math.",
+            "groundsource": "Historical event-footprint context only; no depth values are present.",
+        },
         "groundsource": {
             "source": groundsource.get("source"),
             "records_scanned": groundsource.get("records_scanned"),
@@ -561,22 +654,27 @@ def build_flood_payload(
             "available_fields": sorted(REQUIRED_COLUMNS),
             "notes": scan_notes,
         },
-        "withheld_output_reasons": reasons,
         "interpretation": (
-            "Null AR fields mean unknown, not dry. No depth raster or contours "
-            "were emitted because the available sources do not establish a local "
-            "water-surface elevation in a verified common vertical datum."
+            "Numeric values are generated from the specified rainfall and retained-water "
+            "fraction using a simplified closed-box terrain model. They are not observed, "
+            "calibrated, or suitable for life-safety decisions."
         ),
     }
     return payload, diagnostics
 
 
-def write_reitz_example(output_dir: Path) -> tuple[Path, Path]:
+def write_reitz_example(
+    output_dir: Path,
+    rainfall_inches: float = DEFAULT_RAINFALL_INCHES,
+    retained_water_fraction: float = DEFAULT_RETAINED_WATER_FRACTION,
+) -> tuple[Path, Path]:
     bbox = reitz_bbox()
     payload, diagnostics = build_flood_payload(
         REITZ_UNION["latitude"],
         REITZ_UNION["longitude"],
         bbox,
+        rainfall_inches=rainfall_inches,
+        retained_water_fraction=retained_water_fraction,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     payload_path = output_dir / "reitz_union_flood.json"
@@ -605,7 +703,20 @@ def create_request_handler():
                 latitude = body["latitude"]
                 longitude = body["longitude"]
                 bbox = tuple(body["bbox_wgs84"])
-                payload, _ = build_flood_payload(latitude, longitude, bbox)
+                rainfall_inches = body.get(
+                    "rainfall_inches", DEFAULT_RAINFALL_INCHES
+                )
+                retained_water_fraction = body.get(
+                    "retained_water_fraction",
+                    DEFAULT_RETAINED_WATER_FRACTION,
+                )
+                payload, _ = build_flood_payload(
+                    latitude,
+                    longitude,
+                    bbox,
+                    rainfall_inches=rainfall_inches,
+                    retained_water_fraction=retained_water_fraction,
+                )
                 self._write_json(200, payload)
             except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
                 self._write_json(400, {"error": str(exc)})
@@ -646,6 +757,17 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument(
+        "--rainfall-inches",
+        type=float,
+        default=DEFAULT_RAINFALL_INCHES,
+    )
+    parser.add_argument(
+        "--retained-water-fraction",
+        type=float,
+        default=DEFAULT_RETAINED_WATER_FRACTION,
+        help="Illustrative fraction of rainfall retained in the closed-box model.",
+    )
+    parser.add_argument(
         "--output-dir",
         type=Path,
         default=Path(__file__).parent,
@@ -654,7 +776,11 @@ def main() -> None:
     if args.serve:
         serve(args.host, args.port)
         return
-    payload_path, diagnostics_path = write_reitz_example(args.output_dir)
+    payload_path, diagnostics_path = write_reitz_example(
+        args.output_dir,
+        args.rainfall_inches,
+        args.retained_water_fraction,
+    )
     print(f"Wrote payload: {payload_path}")
     print(f"Wrote diagnostics: {diagnostics_path}")
 
