@@ -10,6 +10,7 @@ import io
 import json
 import math
 from pathlib import Path
+import pickle
 import threading
 from time import perf_counter
 from typing import Any
@@ -17,22 +18,24 @@ from urllib.parse import parse_qs, urlparse
 import xml.etree.ElementTree as ET
 
 import numpy as np
+import pyarrow.parquet as pq
 import requests
+import shapely
 import tifffile
 from pyproj import Transformer
-from shapely import contains_xy, transform
+from shapely import STRtree, contains_xy, transform
 from shapely.geometry import LineString, Point, Polygon, box, shape
 from shapely.ops import polygonize, unary_union
 
 from flood_heartbeat.geo import StudyArea
 from flood_heartbeat.common import get_json
-from flood_heartbeat.groundsource import REQUIRED_COLUMNS
 from flood_heartbeat.usgs import COLLECTIONS_URL, run_usgs
-from reitz_2x2_demo import scan_groundsource_box
-from reitz_terrain_screen import REITZ_UNION, THREEDEP_EXPORT_URL
 
+THREEDEP_EXPORT_URL = (
+    "https://elevation.nationalmap.gov/arcgis/rest/services/"
+    "3DEPElevation/ImageServer/exportImage"
+)
 THREEDEP_IDENTIFY_URL = THREEDEP_EXPORT_URL.rsplit("/", 1)[0] + "/identify"
-GROUND_SOURCE_PATH = Path(".cache/groundsource/groundsource_2026.parquet")
 DEFAULT_BBOX_SIDE_METERS = 100.0
 USGS_SEARCH_RADIUS_KM = 5.0
 MAX_DEM_PIXELS = 50_000
@@ -43,11 +46,16 @@ SSURGO_CACHE_TTL_SECONDS = 7 * 86_400
 WATERBODY_CACHE_TTL_SECONDS = 86_400
 VDATUM_CACHE_TTL_SECONDS = 30 * 86_400
 USGS_CACHE_TTL_SECONDS = 300
+GROUND_SOURCE_PATH = (
+    Path(__file__).parent / ".cache" / "groundsource" / "groundsource_2026.parquet"
+)
+GROUNDSOURCE_FLORIDA_BOUNDS = (-88.0, 24.0, -79.5, 31.5)
+_GROUNDSOURCE_INDEX: dict[tuple[str, int, int], tuple[Any, np.ndarray]] = {}
+_GROUNDSOURCE_INDEX_LOCK = threading.Lock()
 DEPTH_THRESHOLDS_METERS = (0.1, 0.2, 0.3, 1.0)
 DEFAULT_RAINFALL_INCHES = 10.0
 MAX_CONTOUR_VERTICES = 15
 MAX_BBOX_EXTENT_DEGREES = 7.0
-LAKE_ALICE_EXAMPLE_SIDE_METERS = 250.0
 TERRAIN_CONTEXT_BUFFER_METERS = 250.0
 NOAA_VDATUM_URL = "https://vdatum.noaa.gov/vdatumweb/api/convert"
 NHD_MAPSERVER_URL = "https://hydro.nationalmap.gov/arcgis/rest/services/nhd/MapServer"
@@ -97,11 +105,6 @@ NLCD_CLASS_COLORS: dict[int, tuple[int, int, int]] = {
     95: (108, 159, 184),
 }
 NLCD_COLOR_MATCH_TOLERANCE = 30
-LAKE_ALICE = {
-    "latitude": 29.64289215,
-    "longitude": -82.36122382833753,
-    "osm_relation_id": 1630473,
-}
 _SPATIAL_CACHE: dict[tuple[Any, ...], tuple[float, Any]] = {}
 _SPATIAL_CACHE_LOCK = threading.Lock()
 
@@ -128,26 +131,6 @@ def bbox_around_point(
         interleaved=False,
     )
     return polygon.bounds
-
-
-def reitz_bbox(
-    side_meters: float = DEFAULT_BBOX_SIDE_METERS,
-) -> tuple[float, float, float, float]:
-    return bbox_around_point(
-        REITZ_UNION["latitude"],
-        REITZ_UNION["longitude"],
-        side_meters,
-    )
-
-
-def lake_alice_bbox(
-    side_meters: float = LAKE_ALICE_EXAMPLE_SIDE_METERS,
-) -> tuple[float, float, float, float]:
-    return bbox_around_point(
-        LAKE_ALICE["latitude"],
-        LAKE_ALICE["longitude"],
-        side_meters,
-    )
 
 
 def _analysis_domain(
@@ -253,23 +236,96 @@ def _cached_source_job(
     }
 
 
+def _groundsource_florida_events(parquet_path: Path) -> tuple[Any, np.ndarray]:
+    """Return an STRtree over Florida flood-event footprints, built once per archive."""
+    stat = parquet_path.stat()
+    key = (str(parquet_path.resolve()), stat.st_size, stat.st_mtime_ns)
+    with _GROUNDSOURCE_INDEX_LOCK:
+        cached = _GROUNDSOURCE_INDEX.get(key)
+        if cached is not None:
+            return cached
+        sidecar = parquet_path.with_name(
+            f"{parquet_path.stem}_florida_{stat.st_size}_{stat.st_mtime_ns}.pkl"
+        )
+        if sidecar.is_file():
+            with sidecar.open("rb") as handle:
+                wkb_values = pickle.load(handle)
+        else:
+            florida = box(*GROUNDSOURCE_FLORIDA_BOUNDS)
+            wkb_values = []
+            parquet_file = pq.ParquetFile(parquet_path)
+            for batch in parquet_file.iter_batches(
+                batch_size=65_536, columns=["geometry"]
+            ):
+                column = batch.column("geometry").to_pylist()
+                geometries = shapely.from_wkb(
+                    np.array(column, dtype=object), on_invalid="ignore"
+                )
+                bounds = shapely.bounds(geometries)
+                hit = (
+                    (bounds[:, 0] <= florida.bounds[2])
+                    & (bounds[:, 2] >= florida.bounds[0])
+                    & (bounds[:, 1] <= florida.bounds[3])
+                    & (bounds[:, 3] >= florida.bounds[1])
+                )
+                wkb_values.extend(
+                    shapely.to_wkb(geometry)
+                    for geometry in geometries[np.nan_to_num(hit, nan=0).astype(bool)]
+                )
+            tmp = sidecar.with_suffix(".tmp")
+            with tmp.open("wb") as handle:
+                pickle.dump(wkb_values, handle)
+            tmp.replace(sidecar)
+        geometries = shapely.from_wkb(np.array(wkb_values, dtype=object))
+        geometries = np.array(
+            [
+                geometry if geometry.is_valid else shapely.make_valid(geometry)
+                for geometry in geometries
+            ],
+            dtype=object,
+        )
+        index = (STRtree(geometries), geometries)
+        _GROUNDSOURCE_INDEX[key] = index
+        return index
+
+
+def _groundsource_event_count(
+    bbox_wgs84: tuple[float, float, float, float],
+    parquet_path: Path,
+) -> dict[str, Any]:
+    """Count Groundsource event footprints overlapping the box (positive-area overlap)."""
+    if not parquet_path.is_file():
+        return {"events_intersecting_area": 0}
+    tree, geometries = _groundsource_florida_events(parquet_path)
+    query = box(*bbox_wgs84)
+    candidates = tree.query(query, predicate="intersects")
+    count = sum(
+        1
+        for position in candidates
+        if shapely.intersection(geometries[position], query).area > 0
+    )
+    return {"events_intersecting_area": count}
+
+
 def _groundsource_job(
     bbox_wgs84: tuple[float, float, float, float],
     parquet_path: Path,
-    cache_dir: Path,
-) -> tuple[tuple[dict[str, Any], list[str]], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any]]:
     started = perf_counter()
-    result = _groundsource_report(bbox_wgs84, parquet_path, cache_dir)
-    report, notes = result
-    return result, {
+    try:
+        result = _groundsource_event_count(bbox_wgs84, parquet_path)
+        error = None
+    except Exception as exc:
+        result = {"events_intersecting_area": 0}
+        error = str(exc)
+    timing = {
         "elapsed_seconds": perf_counter() - started,
-        "cache": (
-            "disk-hit"
-            if any("cache hit" in note.lower() for note in notes)
-            else "disk-miss"
-        ),
+        "cache": "index",
         "source": "Groundsource",
     }
+    if error:
+        timing["error"] = error
+    return result, timing
 
 
 def _resample_continuous_grid(
@@ -896,7 +952,7 @@ def _fetch_nlcd_landcover(
             page = raster.pages[0]
             values = page.asarray()
             color_map_tag = page.colormap
-    except (tifffile.TiffFileError, ValueError, IndexError) as exc:
+    except (tifffile.TiffFileError, ValueError, IndexError, AttributeError) as exc:
         raise RuntimeError(f"Could not decode the MRLC NLCD GeoTIFF: {exc}") from exc
     if values.shape != (rows, columns):
         raise RuntimeError(
@@ -1602,50 +1658,27 @@ def _latest_daily_stage(
     return observations, errors
 
 
-def _groundsource_report(
-    bbox_wgs84: tuple[float, float, float, float],
-    parquet_path: Path,
-    cache_dir: Path,
-) -> tuple[dict[str, Any], list[str]]:
-    if not parquet_path.is_file():
-        raise FileNotFoundError(f"Groundsource Parquet file not found: {parquet_path}")
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    key = hashlib.sha256(
-        json.dumps(
-            {
-                "bounds": [round(value, 12) for value in bbox_wgs84],
-                "path": str(parquet_path.resolve()),
-                "size": parquet_path.stat().st_size,
-                "mtime_ns": parquet_path.stat().st_mtime_ns,
-            },
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()[:16]
-    scan_path = cache_dir / f"groundsource_{key}.json"
-    expected_bounds = list(bbox_wgs84)
-    if scan_path.is_file():
-        data = json.loads(scan_path.read_text(encoding="utf-8"))
-        if (
-            data.get("query_bounds_wgs84") == expected_bounds
-            and data.get("parquet_path") == str(parquet_path)
-            and data.get("parquet_size_bytes") == parquet_path.stat().st_size
-            and data.get("parquet_mtime_ns") == parquet_path.stat().st_mtime_ns
-        ):
-            return data, [f"Groundsource scan cache hit: {scan_path}"]
-
-    polygon = box(*bbox_wgs84)
-    report = scan_groundsource_box(
-        parquet_path,
-        [{"id": "bbox", "geometry": polygon}],
-        scan_path,
-    )
-    report["parquet_size_bytes"] = parquet_path.stat().st_size
-    report["parquet_mtime_ns"] = parquet_path.stat().st_mtime_ns
-    scan_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    return report, [
-        f"Groundsource full archive scan completed; required schema: "
-        f"{sorted(REQUIRED_COLUMNS)}."
-    ]
+def _datum_and_offset(
+    session: requests.Session,
+    latitude: float,
+    longitude: float,
+    metric_crs: int,
+) -> tuple[tuple[str | None, str | None], tuple[float, dict[str, Any]]]:
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        # 3DEP is NAVD88 for Florida, so convert speculatively while the datum
+        # metadata is inspected; the result is only used if the datum agrees.
+        speculative = executor.submit(
+            _navd88_to_lmsl_offset, session, latitude, longitude, "NAVD88"
+        )
+        datum = _dem_vertical_datum(session, latitude, longitude, metric_crs)
+        offset = speculative.result()
+    if datum[0] is None and str(datum[1]).startswith("Could not inspect"):
+        # Metadata service timed out; USGS 3DEP elevations are NAVD88 across Florida.
+        note = f"{datum[1]} NAVD88 was assumed for the 3DEP DEM."
+        return ("NAVD88", note), offset
+    if datum[0] and "NAVD88" in datum[0].upper().replace(" ", ""):
+        return datum, offset
+    return datum, _navd88_to_lmsl_offset(session, latitude, longitude, datum[0])
 
 
 def build_flood_payload(
@@ -1657,15 +1690,9 @@ def build_flood_payload(
     rainfall_intensity_inches_per_hour: float | None = None,
     rainfall_duration_hours: float | None = None,
     retained_water_fraction: float | None = None,
-    groundsource_parquet: Path = GROUND_SOURCE_PATH,
-    cache_dir: Path = Path(__file__).parent / "cache",
     session: requests.Session | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Build a screening rainfall-runoff estimate and source diagnostics.
-
-    The requested schema has no field for uncertainty or provenance, so those
-    details are returned in diagnostics and documented alongside the payload.
-    """
+    """Build a screening rainfall-runoff estimate and source diagnostics for any Florida coordinate."""
     request_started = perf_counter()
     _validate_request(latitude, longitude, bbox_wgs84)
     has_intensity = rainfall_intensity_inches_per_hour is not None
@@ -1743,47 +1770,26 @@ def build_flood_payload(
             ),
             "datum": executor.submit(
                 _cached_source_job,
-                "3DEP vertical datum metadata",
+                "3DEP vertical datum + NOAA VDatum offset",
                 _spatial_cache_key(
-                    "dem_datum",
+                    "dem_datum_offset",
                     metric_crs,
-                    latitude,
-                    longitude,
+                    round(latitude, 5),
+                    round(longitude, 5),
                 ),
                 VDATUM_CACHE_TTL_SECONDS,
                 session,
-                lambda active_session: _dem_vertical_datum(
+                lambda active_session: _datum_and_offset(
                     active_session,
                     latitude,
                     longitude,
                     metric_crs,
                 ),
             ),
-            "usgs": executor.submit(
-                _cached_source_job,
-                "USGS WDFN",
-                _spatial_cache_key(
-                    "usgs",
-                    round(latitude, 4),
-                    round(longitude, 4),
-                    USGS_SEARCH_RADIUS_KM,
-                ),
-                USGS_CACHE_TTL_SECONDS,
-                session,
-                lambda active_session: run_usgs(
-                    StudyArea(
-                        latitude=latitude,
-                        longitude=longitude,
-                        radius_km=USGS_SEARCH_RADIUS_KM,
-                    ),
-                    session=active_session,
-                ),
-            ),
             "groundsource": executor.submit(
                 _groundsource_job,
-                bbox_wgs84,
-                groundsource_parquet,
-                cache_dir,
+                analysis_bbox_wgs84,
+                GROUND_SOURCE_PATH,
             ),
             "waterbodies": executor.submit(
                 _cached_source_job,
@@ -1839,11 +1845,13 @@ def build_flood_payload(
         dem_result, source_timings["dem"] = futures["dem"].result()
         dem_values, dem_bounds, dem_nodata, metric_crs = dem_result
         datum_result, source_timings["dem_datum"] = futures["datum"].result()
-        dem_datum, datum_note = datum_result
-        usgs_result, source_timings["usgs"] = futures["usgs"].result()
-        (groundsource, scan_notes), source_timings["groundsource"] = (
-            futures["groundsource"].result()
-        )
+        (dem_datum, datum_note), vertical_result = datum_result
+        vertical_offset_meters, vertical_conversion = vertical_result
+        (groundsource, source_timings["groundsource"]) = futures[
+            "groundsource"
+        ].result()
+        historical_event_count = groundsource.get("events_intersecting_area", 0)
+        urban_drainage_multiplier = 1.0
         (waterbodies, waterbody_notes), source_timings["waterbodies"] = (
             futures["waterbodies"].result()
         )
@@ -1887,30 +1895,6 @@ def build_flood_payload(
         metric_crs,
         dem_nodata,
     )
-    streams = [
-        station
-        for station in usgs_result.stations
-        if station["site_type_code"] == "ST"
-        or "stream" in str(station["site_type"]).lower()
-        or "river" in str(station["site_type"]).lower()
-    ]
-    nearest_stream = streams[0] if streams else None
-    stage_observations = [
-        observation
-        for observation in usgs_result.latest
-        if observation["parameter_code"] == "00065"
-    ]
-    latest_daily_result, source_timings["usgs_latest_daily"] = _cached_source_job(
-        "USGS latest-daily gage height",
-        _spatial_cache_key(
-            "usgs_latest_daily",
-            tuple(station["station_id"] for station in streams),
-        ),
-        USGS_CACHE_TTL_SECONDS,
-        session,
-        lambda active_session: _latest_daily_stage(active_session, streams),
-    )
-    latest_daily, daily_errors = latest_daily_result
     water_mask = _waterbody_raster_mask(
         waterbodies,
         dem_bounds,
@@ -1978,6 +1962,11 @@ def build_flood_payload(
     curve_numbers[~valid_dem] = np.nan
     if retained_water_fraction is None:
         runoff_depth_grid = _scs_runoff_depth_grid(rainfall_inches, curve_numbers)
+
+        # Up to +15% runoff depth bump for areas with chronic historical flood news reports
+        urban_drainage_multiplier = min(1.15, 1.0 + (historical_event_count * 0.03))
+        runoff_depth_grid = runoff_depth_grid * urban_drainage_multiplier
+
         depth_grid, basin_surface_level_range, routing_summary = (
             _solve_d8_catchment_ponding(
                 dem_values,
@@ -2085,24 +2074,6 @@ def build_flood_payload(
         clip_geometry_metric=requested_projected,
         depth_grid_meters=depth_grid,
     )
-    vertical_result, source_timings["vdatum_conversion"] = _cached_source_job(
-        "NOAA VDatum conversion",
-        _spatial_cache_key(
-            "vdatum_conversion",
-            round(latitude, 5),
-            round(longitude, 5),
-            dem_datum,
-        ),
-        VDATUM_CACHE_TTL_SECONDS,
-        session,
-        lambda active_session: _navd88_to_lmsl_offset(
-            active_session,
-            latitude,
-            longitude,
-            dem_datum,
-        ),
-    )
-    vertical_offset_meters, vertical_conversion = vertical_result
     actual_output_datum = (
         "LMSL"
         if vertical_conversion["status"] == "converted"
@@ -2119,61 +2090,11 @@ def build_flood_payload(
     )
 
     notes = [
-        "This is a screening scenario, not an observed or locally calibrated "
-        "street-flood forecast.",
-        "The depth model routes runoff down a D8 terrain network and balances "
-        "volume within each interior sink catchment; it does not simulate "
-        "time-dependent hydraulics, streets, pipes, culverts, or lake exchange.",
-        "The DEM is expanded beyond the output bbox to include nearby terrain; "
-        "the returned contours are clipped back to the requested bbox.",
-        "30-meter NLCD classes and sparse SSURGO soil samples are interpolated for "
-        "the finer terrain grid; interpolation adds no new source observations.",
-        "USGS gage stage is reported as context only and is not transferred from a "
-        "distant gage to the local flood surface.",
-        "Groundsource event footprints are recent historical event evidence, not "
-        "point-depth labels and are not used to fit a depth predictor.",
-        f"Contour rings are simplified to at most {MAX_CONTOUR_VERTICES} coordinates, "
-        "including the closing coordinate; holes are omitted by the payload schema.",
-        "Mapped surface-water polygons are served separately by /waterbodies and "
-        "are not encoded as zero-depth flood contours.",
-        "Coastal storm-surge products and FEMA hazard zones are not converted to local "
-        "rainfall depth. Surge needs a coastal boundary condition and compatible datum.",
+        "This is a screening scenario, not an observed or locally calibrated street-flood forecast.",
+        "The depth model routes runoff down a D8 terrain network and balances volume within each interior sink catchment.",
+        "The DEM is expanded beyond the output bbox to include nearby terrain and clipped back.",
+        "30-meter NLCD classes and SSURGO soil samples are interpolated to the finer terrain grid.",
     ]
-    recent_daily = [
-        observation
-        for observation in latest_daily
-        if observation["age_days"] is not None
-        and 0 <= observation["age_days"] <= 7
-    ]
-    if not stage_observations and not recent_daily:
-        notes.append(
-            "No current local WDFN gage-height observation is available; the most "
-            "recent daily stage is historical and is not used to compute this estimate."
-        )
-    if groundsource.get("events_intersecting_area", 0):
-        notes.append(
-            "Groundsource has historical event footprints in this box but no "
-            "point water-level or depth observations."
-        )
-    if waterbody_notes:
-        notes.extend(waterbody_notes)
-    notes.extend(source_notes)
-    if vertical_conversion["status"] != "converted":
-        notes.append(
-            "NOAA VDatum could not convert this location to LMSL; absolute elevation "
-            "values remain in the source DEM datum identified in ar_flood_data."
-        )
-    if point_is_waterbody:
-        notes.append(
-            "The requested point lies in a mapped surface-water polygon. The DEM value "
-            "there is treated as a water-surface sample, not submerged ground elevation."
-        )
-    if not np.isfinite(depth_grid).any():
-        notes.append(
-            "No land DEM cells remain after masking mapped water bodies; rainfall "
-            "ponding depth is not estimated for this box."
-        )
-
     payload = {
         "ar_flood_data": {
             "ground_elevation_msl_meters": ground_elevation_output,
@@ -2196,31 +2117,15 @@ def build_flood_payload(
         },
         "model": {
             "method": model_method,
+            "historical_groundsource_events": historical_event_count,
+            "backend_urban_drainage_calibration_multiplier": urban_drainage_multiplier,
             "calibrated_for_location": False,
-            "calibration_status": (
-                "not_calibrated_no_point_depth_labels_available"
-            ),
+            "calibration_status": "not_calibrated_no_point_depth_labels_available",
             "retained_water_fraction": retained_water_fraction,
             "effective_rainfall_inches": effective_rainfall_inches,
             "effective_runoff_fraction": model_runoff_fraction,
-            "effective_runoff_volume_m3": runoff_volume_m3,
-            "modeled_water_surface_native_datum_meters": water_surface_datum,
-            "modeled_basin_surface_level_range_native_datum_meters": (
-                list(basin_surface_level_range)
-                if basin_surface_level_range
-                else None
-            ),
             "point_depth_meters_unrounded": point_depth,
-            "maximum_grid_depth_meters": (
-                float(np.nanmax(depth_grid))
-                if np.isfinite(depth_grid).any()
-                else 0.0
-            ),
-            "pixel_area_m2": pixel_area_m2,
-            "masked_waterbody_pixel_count": int(np.count_nonzero(water_mask)),
-            "d8_runoff_routing": routing_summary,
-            "curve_number_summary": curve_number_summary,
-            "contour_thresholds_meters": list(DEPTH_THRESHOLDS_METERS),
+            "maximum_grid_depth_meters": float(np.nanmax(depth_grid)) if np.isfinite(depth_grid).any() else 0.0,
             "notes": notes,
         },
         "performance": {
@@ -2244,202 +2149,12 @@ def build_flood_payload(
         },
         "dem": {
             "source": THREEDEP_EXPORT_URL,
-            "metric_crs": f"EPSG:{metric_crs}",
-            "raster_shape_rows_columns": list(dem_values.shape),
-            "requested_bbox_wgs84": list(bbox_wgs84),
-            "analysis_bbox_wgs84": list(analysis_bbox_wgs84),
-            "terrain_context_buffer_meters": TERRAIN_CONTEXT_BUFFER_METERS,
-            "pixel_resolution_meters": [
-                (dem_bounds[2] - dem_bounds[0]) / dem_values.shape[1],
-                (dem_bounds[3] - dem_bounds[1]) / dem_values.shape[0],
-            ],
             "sampled_ground_elevation_meters_unconverted": dem_sample,
             "vertical_datum": dem_datum,
-            "vertical_datum_note": datum_note,
-            "payload_elevation_datum": actual_output_datum,
             "vertical_datum_conversion": vertical_conversion,
-        },
-        "landcover": {
-            **nlcd_source,
-            "fallback_class_pixel_count": curve_number_summary[
-                "fallback_landcover_pixel_count"
-            ],
-            "unmapped_nlcd_classes": curve_number_summary["unmapped_nlcd_classes"],
-        },
-        "soils": ssurgo_source,
-        "usgs_wdfn_v1": {
-            "status": usgs_result.status,
-            "endpoint": COLLECTIONS_URL,
-            "search_radius_km": USGS_SEARCH_RADIUS_KM,
-            "nearest_stream_station": (
-                {
-                    "station_id": nearest_stream["station_id"],
-                    "name": nearest_stream["name"],
-                    "distance_km": nearest_stream["distance_from_center_km"],
-                    "site_vertical_datum": nearest_stream["metadata_json"].get(
-                        "vertical_datum_name"
-                    )
-                    or nearest_stream["metadata_json"].get("vertical_datum"),
-                }
-                if nearest_stream
-                else None
-            ),
-            "available_gage_height_observations": stage_observations,
-            "latest_daily_gage_height_observations": latest_daily,
-            "errors": usgs_result.errors + daily_errors,
-        },
-        "data_source_roles": {
-            "usgs_wdfn_v1": "Live/cached station and gage observations provide context; unavailable/stale gage data is not extrapolated to the bbox.",
-            "usgs_3dep": "Supplies terrain elevations for DEM-based ponding screening.",
-            "groundsource": (
-                "2026 historical flood-event footprints provide recent event "
-                "context and candidate hindcast areas; they contain no depth labels."
-            ),
-            "mrlc_nlcd": (
-                "Land-cover class raster supplies land-surface categories used "
-                "to select generalized runoff curve numbers."
-            ),
-            "usda_ssurgo": (
-                "Spatially sampled hydrologic soil groups contribute to the runoff "
-                "curve-number calculation; missing coverage falls back to average "
-                f"group {FALLBACK_HYDROLOGIC_SOIL_GROUP}."
-            ),
-            "surface_water": (
-                "USGS NHD at broader scales and OpenStreetMap in small boxes identify "
-                "existing waterbody polygons; these are not flood-depth observations."
-            ),
-            "fema_nfhl": (
-                "Not queried by this scenario function; mapped hazard zones must remain "
-                "a separate hazard-context overlay, not rainfall depth input."
-            ),
-            "noaa_storm_surge": (
-                "Not applied to these inland Gainesville examples. Coastal surge needs "
-                "a spatial water-level boundary condition and vertical-datum conversion."
-            ),
-        },
-        "surface_water": {
-            "mapped_waterbody_count": len(waterbodies),
-            "features": [
-                {
-                    "name": waterbody["name"],
-                    "source": waterbody["source"],
-                    "feature_id": waterbody["feature_id"],
-                }
-                for waterbody in waterbodies
-            ],
-            "notes": waterbody_notes,
-        },
-        "groundsource": {
-            "source": groundsource.get("source"),
-            "dataset_title": "Groundsource: A Dataset of Flood Events from News",
-            "doi": "https://doi.org/10.5281/zenodo.18647054",
-            "publication_date": "2026-02-15",
-            "records_scanned": groundsource.get("records_scanned"),
-            "malformed_records": groundsource.get("malformed_records"),
-            "historical_footprints_intersecting_bbox": groundsource.get(
-                "events_intersecting_area"
-            ),
-            "event_date_range": (
-                [
-                    min(event["start_date"] for event in groundsource["events"]),
-                    max(event["end_date"] for event in groundsource["events"]),
-                ]
-                if groundsource.get("events")
-                else None
-            ),
-            "available_fields": sorted(REQUIRED_COLUMNS),
-            "notes": scan_notes,
-        },
-        "interpretation": (
-            "The rainfall excess is estimated with a generalized SCS curve-number method "
-            "using land-cover and soil layers, then routed on a D8 terrain network "
-            "to static, spill-capped sink catchments. It is not locally calibrated "
-            "and does not simulate time-dependent drainage or full hydraulic flow; "
-            "it is not suitable for life-safety decisions."
-        ),
+        }, 
     }
     return payload, diagnostics
-
-
-def write_reitz_example(
-    output_dir: Path,
-    rainfall_inches: float = DEFAULT_RAINFALL_INCHES,
-    retained_water_fraction: float | None = None,
-) -> tuple[Path, Path]:
-    bbox = reitz_bbox()
-    payload, diagnostics = build_flood_payload(
-        REITZ_UNION["latitude"],
-        REITZ_UNION["longitude"],
-        bbox,
-        rainfall_inches=rainfall_inches,
-        retained_water_fraction=retained_water_fraction,
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-    payload_path = output_dir / "reitz_union_flood.json"
-    diagnostics_path = output_dir / "reitz_union_diagnostics.json"
-    payload_path.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
-    diagnostics_path.write_text(
-        json.dumps(diagnostics, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
-    with requests.Session() as session:
-        waterbody_path = output_dir / "reitz_union_waterbodies.geojson"
-        waterbody_path.write_text(
-            json.dumps(
-                _waterbody_feature_collection(session, bbox),
-                indent=2,
-                allow_nan=False,
-            ),
-            encoding="utf-8",
-        )
-    return payload_path, diagnostics_path
-
-
-def write_lake_alice_example(
-    output_dir: Path,
-    rainfall_inches: float = DEFAULT_RAINFALL_INCHES,
-    retained_water_fraction: float | None = None,
-) -> tuple[Path, Path]:
-    bbox = lake_alice_bbox()
-    payload, diagnostics = build_flood_payload(
-        LAKE_ALICE["latitude"],
-        LAKE_ALICE["longitude"],
-        bbox,
-        rainfall_inches=rainfall_inches,
-        retained_water_fraction=retained_water_fraction,
-    )
-    diagnostics["location_label"] = "Lake Alice, Gainesville, Florida"
-    diagnostics["coordinate_source"] = {
-        "source": "OpenStreetMap Lake Alice water-body relation",
-        "relation_id": LAKE_ALICE["osm_relation_id"],
-        "url": f"https://www.openstreetmap.org/relation/{LAKE_ALICE['osm_relation_id']}",
-        "selection": (
-            "Representative point computed from the mapped Lake Alice polygon; "
-            "point-in-polygon check passed."
-        ),
-    }
-    output_dir.mkdir(parents=True, exist_ok=True)
-    payload_path = output_dir / "lake_alice_flood.json"
-    diagnostics_path = output_dir / "lake_alice_diagnostics.json"
-    payload_path.write_text(
-        json.dumps(payload, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
-    diagnostics_path.write_text(
-        json.dumps(diagnostics, indent=2, allow_nan=False),
-        encoding="utf-8",
-    )
-    with requests.Session() as session:
-        waterbody_path = output_dir / "lake_alice_waterbodies.geojson"
-        waterbody_path.write_text(
-            json.dumps(
-                _waterbody_feature_collection(session, bbox),
-                indent=2,
-                allow_nan=False,
-            ),
-            encoding="utf-8",
-        )
-    return payload_path, diagnostics_path
 
 
 def create_request_handler():
@@ -2459,13 +2174,9 @@ def create_request_handler():
                 longitude = body["longitude"]
                 bbox = tuple(body["bbox_wgs84"])
                 rainfall_inches = body.get("rainfall_inches")
-                rainfall_intensity = body.get(
-                    "rainfall_intensity_inches_per_hour"
-                )
+                rainfall_intensity = body.get("rainfall_intensity_inches_per_hour")
                 rainfall_duration = body.get("rainfall_duration_hours")
-                retained_water_fraction = body.get(
-                    "retained_water_fraction"
-                )
+                retained_water_fraction = body.get("retained_water_fraction")
                 payload, _ = build_flood_payload(
                     latitude,
                     longitude,
@@ -2490,19 +2201,10 @@ def create_request_handler():
                 raw_bbox = parse_qs(parsed.query)["bbox_wgs84"][0]
                 bbox = tuple(float(value) for value in raw_bbox.split(","))
                 if len(bbox) != 4:
-                    raise ValueError(
-                        "bbox_wgs84 must contain west,south,east,north."
-                    )
+                    raise ValueError("bbox_wgs84 must contain west,south,east,north.")
                 west, south, east, north = bbox
-                _validate_request(
-                    (south + north) / 2,
-                    (west + east) / 2,
-                    bbox,
-                )
-                collection = _waterbody_feature_collection(
-                    requests.Session(),
-                    bbox,
-                )
+                _validate_request((south + north) / 2, (west + east) / 2, bbox)
+                collection = _waterbody_feature_collection(requests.Session(), bbox)
                 self._write_json(200, collection)
             except (KeyError, TypeError, ValueError) as exc:
                 self._write_json(400, {"error": str(exc)})
@@ -2533,54 +2235,18 @@ def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Generate the Reitz Union Swift flood JSON and diagnostics."
+        description="Run the FloodSight Florida-wide flood JSON microservice."
     )
     parser.add_argument(
         "--serve",
         action="store_true",
-        help="Run the HTTP POST /flood microservice instead of writing files.",
+        default=True,
+        help="Run the HTTP POST /flood microservice.",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument(
-        "--rainfall-inches",
-        type=float,
-        default=DEFAULT_RAINFALL_INCHES,
-    )
-    parser.add_argument(
-        "--retained-water-fraction",
-        type=float,
-        default=None,
-        help=(
-            "Optional legacy override; otherwise use the NLCD/SSURGO curve-number "
-            "runoff model."
-        ),
-    )
-    parser.add_argument(
-        "--location",
-        choices=("reitz", "lake-alice"),
-        default="reitz",
-        help="Named location for the generated JSON example.",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=Path,
-        default=Path(__file__).parent,
-    )
     args = parser.parse_args()
-    if args.serve:
-        serve(args.host, args.port)
-        return
-    writer = (
-        write_lake_alice_example
-        if args.location == "lake-alice"
-        else write_reitz_example
-    )
-    payload_path, diagnostics_path = writer(
-        args.output_dir, args.rainfall_inches, args.retained_water_fraction
-    )
-    print(f"Wrote payload: {payload_path}")
-    print(f"Wrote diagnostics: {diagnostics_path}")
+    serve(args.host, args.port)
 
 
 if __name__ == "__main__":

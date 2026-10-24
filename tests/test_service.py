@@ -12,7 +12,7 @@ import numpy as np
 from pyproj import Transformer
 from shapely.geometry import Point, Polygon, box, shape
 
-from test_json.service import (
+from service import (
     _SPATIAL_CACHE,
     _SPATIAL_CACHE_LOCK,
     _cached_spatial_data,
@@ -30,8 +30,6 @@ from test_json.service import (
     bbox_around_point,
     build_flood_payload,
     create_request_handler,
-    lake_alice_bbox,
-    reitz_bbox,
     vectorize_depth_thresholds,
 )
 
@@ -86,24 +84,6 @@ class FloodPayloadTests(unittest.TestCase):
         color_map[:, 1] = np.asarray((10, 20, 30), dtype=np.uint16) * 257
         with self.assertRaisesRegex(RuntimeError, "do not match known class colors"):
             _decode_nlcd_values(values, color_map)
-
-    def test_reitz_bbox_contains_existing_demo_coordinate(self) -> None:
-        west, south, east, north = reitz_bbox()
-        self.assertLess(west, -82.34834)
-        self.assertGreater(east, -82.34834)
-        self.assertLess(south, 29.64489)
-        self.assertGreater(north, 29.64489)
-
-    def test_lake_alice_bbox_contains_verified_lake_point(self) -> None:
-        west, south, east, north = lake_alice_bbox()
-        self.assertLess(west, -82.36122382833753)
-        self.assertGreater(east, -82.36122382833753)
-        self.assertLess(south, 29.64289215)
-        self.assertGreater(north, 29.64289215)
-        self.assertEqual(
-            bbox_around_point(29.64289215, -82.36122382833753, 250.0),
-            lake_alice_bbox(),
-        )
 
     def test_default_contours_include_shallow_flood_depths(self) -> None:
         contours = vectorize_depth_thresholds(
@@ -377,7 +357,7 @@ class FloodPayloadTests(unittest.TestCase):
         circle = Polygon(coordinates)
         bbox = (-82.35, 29.64, -82.34, 29.65)
         with patch(
-            "test_json.service._fetch_waterbodies",
+            "service._fetch_waterbodies",
             return_value=(
                 [{
                     "geometry": circle,
@@ -410,24 +390,24 @@ class FloodPayloadTests(unittest.TestCase):
         }
         with (
             patch(
-                "test_json.service._fetch_dem",
+                "service._fetch_dem",
                 return_value=(np.full((2, 2), 34.8), (0, 0, 2, 2), None, 32617),
             ),
-            patch("test_json.service._bilinear_sample", return_value=34.8),
-            patch("test_json.service._dem_vertical_datum", return_value=(None, None)),
+            patch("service._bilinear_sample", return_value=34.8),
+            patch("service._dem_vertical_datum", return_value=(None, None)),
             patch(
-                "test_json.service._navd88_to_lmsl_offset",
+                "service._navd88_to_lmsl_offset",
                 return_value=(0.0, {"status": "unsupported_source_datum"}),
             ),
-            patch("test_json.service.run_usgs", return_value=usgs),
-            patch("test_json.service._groundsource_report", return_value=(groundsource, [])),
-            patch("test_json.service._fetch_waterbodies", return_value=([], [])),
+            patch("service.run_usgs", return_value=usgs),
+            patch("service._groundsource_event_count", return_value=groundsource),
+            patch("service._fetch_waterbodies", return_value=([], [])),
             patch(
-                "test_json.service._fetch_nlcd_landcover",
+                "service._fetch_nlcd_landcover",
                 return_value=np.full((2, 2), 71, dtype=np.uint8),
             ),
             patch(
-                "test_json.service._fetch_ssurgo_hydrologic_soil_grid",
+                "service._fetch_ssurgo_hydrologic_soil_grid",
                 return_value=(
                     np.full((2, 2), 3, dtype=np.uint8),
                     {"samples_with_soil_attributes": 16},
@@ -491,7 +471,7 @@ class FloodPayloadTests(unittest.TestCase):
                 }
             ]
         }
-        with patch("test_json.service.get_json", return_value=response):
+        with patch("service.get_json", return_value=response):
             observations, errors = _latest_daily_stage(object(), [station])
         self.assertEqual(errors, [])
         self.assertEqual(observations[0]["value"], "2.67")
@@ -515,33 +495,33 @@ class FloodPayloadTests(unittest.TestCase):
         }
         with (
             patch(
-                "test_json.service._fetch_dem",
+                "service._fetch_dem",
                 return_value=(np.full((2, 2), 34.8), (0, 0, 2, 2), None, 32617),
             ),
-            patch("test_json.service._bilinear_sample", return_value=34.8),
+            patch("service._bilinear_sample", return_value=34.8),
             patch(
-                "test_json.service._dem_vertical_datum",
+                "service._dem_vertical_datum",
                 return_value=("NAVD88", None),
             ),
             patch(
-                "test_json.service._navd88_to_lmsl_offset",
+                "service._navd88_to_lmsl_offset",
                 return_value=(
                     0.125,
                     {"status": "converted", "applied_offset_meters": 0.125},
                 ),
             ),
-            patch("test_json.service.run_usgs", return_value=usgs),
+            patch("service.run_usgs", return_value=usgs),
             patch(
-                "test_json.service._groundsource_report",
-                return_value=(groundsource, []),
+                "service._groundsource_event_count",
+                return_value=groundsource,
             ),
-            patch("test_json.service._fetch_waterbodies", return_value=([], [])),
+            patch("service._fetch_waterbodies", return_value=([], [])),
             patch(
-                "test_json.service._fetch_nlcd_landcover",
+                "service._fetch_nlcd_landcover",
                 return_value=np.full((2, 2), 71, dtype=np.uint8),
             ),
             patch(
-                "test_json.service._fetch_ssurgo_hydrologic_soil_grid",
+                "service._fetch_ssurgo_hydrologic_soil_grid",
                 return_value=(
                     np.full((2, 2), 3, dtype=np.uint8),
                     {"samples_with_soil_attributes": 16},
@@ -613,7 +593,7 @@ class FloodHttpServiceTests(unittest.TestCase):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
         try:
             with patch(
-                "test_json.service.build_flood_payload",
+                "service.build_flood_payload",
                 return_value=(payload, {"internal": "diagnostics"}),
             ) as build:
                 connection.request(
@@ -663,7 +643,7 @@ class FloodHttpServiceTests(unittest.TestCase):
         connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port)
         try:
             with patch(
-                "test_json.service._waterbody_feature_collection",
+                "service._waterbody_feature_collection",
                 return_value=expected,
             ) as fetch:
                 connection.request(

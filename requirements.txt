@@ -1,5 +1,7 @@
-requests>=2.32,<3
-pyarrow>=19
+numpy>=1.26,<2.0
+requests>=2.32
 shapely>=2.0
 pyproj>=3.6
 tifffile>=2025.1
+pyarrow>=19
+
