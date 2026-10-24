@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -390,7 +390,7 @@ def _validate_request(
         raise ValueError("The GPS coordinate must lie inside the requested box.")
     if east - west > MAX_BBOX_EXTENT_DEGREES or north - south > MAX_BBOX_EXTENT_DEGREES:
         raise ValueError(
-            f"Bounding-box dimensions cannot exceed {MAX_BBOX_EXTENT_DEGREES}°."
+            f"Bounding-box dimensions cannot exceed {MAX_BBOX_EXTENT_DEGREES}Â°."
         )
 
 
@@ -1675,7 +1675,7 @@ def _datum_and_offset(
     if datum[0] is None and str(datum[1]).startswith("Could not inspect"):
         # Metadata service timed out; USGS 3DEP elevations are NAVD88 across Florida.
         note = f"{datum[1]} NAVD88 was assumed for the 3DEP DEM."
-        return ("NAVD88", note), offset
+        return ("North American Vertical Datum of 1988 (NAVD 88)", note), offset
     if datum[0] and "NAVD88" in datum[0].upper().replace(" ", ""):
         return datum, offset
     return datum, _navd88_to_lmsl_offset(session, latitude, longitude, datum[0])
