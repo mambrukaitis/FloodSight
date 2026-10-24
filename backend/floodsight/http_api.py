@@ -69,10 +69,12 @@ def create_request_handler():
                 body = json.loads(self.rfile.read(content_length))
                 if not isinstance(body, dict):
                     raise ValueError("Request body must be a JSON object.")
+                south, west = _corner(body["southwest"], "southwest")
+                north, east = _corner(body["northeast"], "northeast")
                 payload, _ = build_flood_payload(
-                    _number(body["latitude"], "latitude"),
-                    _number(body["longitude"], "longitude"),
-                    tuple(_number(value, "bbox_wgs84") for value in body["bbox_wgs84"]),
+                    (south + north) / 2,
+                    (west + east) / 2,
+                    (west, south, east, north),
                     rainfall_inches=_optional_number(body, "rainfall_inches"),
                     rainfall_intensity_inches_per_hour=_optional_number(
                         body, "rainfall_intensity_inches_per_hour"
@@ -112,6 +114,19 @@ def _number(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{name} must contain numbers.")
     return value
+
+
+def _corner(value: Any, name: str) -> tuple[float, float]:
+    """Parse a {"latitude", "longitude"} corner object into (latitude, longitude)."""
+    if not isinstance(value, dict):
+        raise ValueError(f"{name} must be an object with latitude and longitude.")
+    try:
+        return (
+            _number(value["latitude"], f"{name}.latitude"),
+            _number(value["longitude"], f"{name}.longitude"),
+        )
+    except KeyError as exc:
+        raise ValueError(f"{name} is missing {exc.args[0]}.") from exc
 
 
 def _optional_number(body: dict[str, Any], name: str) -> float | None:
