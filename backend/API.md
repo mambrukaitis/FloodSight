@@ -9,6 +9,7 @@ and no CORS (the client is a native iOS app, which does not need it).
 | GET | `/health` | Liveness / readiness |
 | POST | `/flood` | Modeled flood depth + contours for a point and bbox |
 | GET | `/waterbodies` | Mapped surface water in a bbox (GeoJSON) |
+| POST | `/ar-depth` | Fast point-only modeled flood depth for AR plane offset |
 
 ## `GET /health`
 
@@ -76,6 +77,41 @@ Success (200):
   where met. Each ring is closed, at most 15 points, clipped to the bbox.
   Polygons overlap (deeper areas also meet shallower thresholds). Existing
   water bodies are not included; use `/waterbodies`.
+
+## `POST /ar-depth`
+
+Calculates the exact modeled flood depth for a single user coordinate to accurately anchor the AR water plane. Bypasses the heavy map contour generation for maximum speed, allowing the frontend AR view to fire off requests rapidly (e.g. if the user drags a rainfall slider) for real-time AR water rising effects.
+
+Request body (JSON, max 64,000 bytes):
+
+```json
+{
+  "latitude": 29.6516,
+  "longitude": -82.3248,
+  "rainfall_inches": 6.0
+}
+```
+
+| Field | Type | Required | Notes |
+|---|---|---|---|
+| `latitude` | number | yes | WGS84, -90..90 |
+| `longitude` | number | yes | WGS84, -180..180 |
+| `rainfall_inches` | number ≥ 0 | no | Total rainfall (defaults to 10 in if omitted) |
+
+Success (200):
+
+```json
+{
+  "water_depth_meters": 0.52,
+  "ground_elevation_msl_meters": 20.1,
+  "is_flooded": true,
+  "elevation_datum": "LMSL"
+}
+```
+
+- `water_depth_meters`: Crucial for the iOS frontend. Use this exact value to offset the AR water plane on the Y-axis in RealityKit.
+- `ground_elevation_msl_meters`: Useful for debugging or displaying a UI label to the user.
+- `is_flooded`: A quick boolean so the frontend knows whether to render the water assets at all.
 
 ## `GET /waterbodies?bbox_wgs84=west,south,east,north`
 

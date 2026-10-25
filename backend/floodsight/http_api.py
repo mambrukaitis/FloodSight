@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from floodsight.flood_payload import build_flood_payload
+from floodsight.flood_payload import build_flood_payload, build_ar_depth_payload
 from floodsight.grid_geometry import validate_request
 from floodsight.groundsource_history import GROUND_SOURCE_PATH
 from floodsight.waterbody_source import waterbody_feature_collection
@@ -57,8 +57,33 @@ def create_request_handler():
                 self._write_json(500, {"error": "Internal server error."})
 
         def do_POST(self) -> None:
+
+            if self.path == "/ar-depth":
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < content_length <= MAX_REQUEST_BYTES:
+                        raise ValueError(f"Request body must be between 1 and {MAX_REQUEST_BYTES} bytes.")
+                    body = json.loads(self.rfile.read(content_length))
+                    if not isinstance(body, dict):
+                        raise ValueError("Request body must be a JSON object.")
+                    payload, _ = build_ar_depth_payload(
+                        _number(body["latitude"], "latitude"),
+                        _number(body["longitude"], "longitude"),
+                        rainfall_inches=_optional_number(body, "rainfall_inches"),
+                    )
+                    self._write_json(200, payload)
+                except KeyError as exc:
+                    self._write_json(400, {"error": f"Missing required field: {exc.args[0]}"})
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    self._write_json(400, {"error": f"Invalid request: {exc}"})
+                except (OSError, requests.RequestException, RuntimeError) as exc:
+                    self._write_json(503, {"error": str(exc)})
+                except Exception:
+                    self._write_json(500, {"error": "Internal server error."})
+                return
+
             if self.path != "/flood":
-                self._write_json(404, {"error": "POST endpoint must be /flood."})
+                self._write_json(404, {"error": "POST endpoint must be /flood or /ar-depth."})
                 return
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
