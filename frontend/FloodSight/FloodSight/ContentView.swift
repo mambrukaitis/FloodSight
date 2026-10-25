@@ -8,21 +8,22 @@
 import SwiftUI
 
 struct ContentView: View {
-    var body: some View {
-        TabView {
-            
-            MapView()
-                .tabItem {
-                    Label("Map", systemImage: "map.fill")
-                }
-            
-            VisualizerView()
-                .tabItem {
-                    Label("Visualizer", systemImage: "camera.viewfinder")
-                }
+    @StateObject private var floodVM = FloodViewModel()
+
+        var body: some View {
+            TabView {
+                MapView(viewModel: floodVM)
+                    .tabItem {
+                        Label("Flood Map", systemImage: "map.fill")
+                    }
+
+                VisualizerView(viewModel: floodVM)
+                    .tabItem {
+                        Label("AR Visualizer", systemImage: "arkit")
+                    }
+            }
         }
     }
-}
 
 #Preview {
     ContentView()

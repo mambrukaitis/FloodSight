@@ -10,9 +10,22 @@
 		E5F38B75308C114700D21DBB /* FloodSight.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FloodSight.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		E55A820B308D526A001D4361 /* Exceptions for "FloodSight" folder in "FloodSight" target */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+			);
+			target = E5F38B74308C114700D21DBB /* FloodSight */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
 		E5F38B77308C114700D21DBB /* FloodSight */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				E55A820B308D526A001D4361 /* Exceptions for "FloodSight" folder in "FloodSight" target */,
+			);
 			path = FloodSight;
 			sourceTree = "<group>";
 		};
@@ -246,7 +259,9 @@
 				DEVELOPMENT_TEAM = J3D5ARA8N3;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = FloodSight/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "\"FloodSight needs camera access to visualize flooding.\"";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "\"FloodSight needs location access to show local flood maps.\"";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -279,7 +294,9 @@
 				DEVELOPMENT_TEAM = J3D5ARA8N3;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = FloodSight/Info.plist;
 				INFOPLIST_KEY_NSCameraUsageDescription = "\"FloodSight needs camera access to visualize flooding.\"";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "\"FloodSight needs location access to show local flood maps.\"";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
