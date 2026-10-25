@@ -66,15 +66,42 @@ def create_request_handler():
                     body = json.loads(self.rfile.read(content_length))
                     if not isinstance(body, dict):
                         raise ValueError("Request body must be a JSON object.")
+                    
+                    lat = _number(body["latitude"], "latitude")
+                    lng = _number(body["longitude"], "longitude")
+                    rain = _optional_number(body, "rainfall_inches")
+                    if rain is None:
+                        rain = 10.0  # Default fallback rainfall
+
+                    # FIX: Create a ~500m surrounding buffer box so water can pool via D8 routing
+                    buffer = 0.005
+                    ar_bbox = [
+                        lng - buffer,  # west
+                        lat - buffer,  # south
+                        lng + buffer,  # east
+                        lat + buffer   # north
+                    ]
+
                     payload, _ = build_ar_depth_payload(
-                        _number(body["latitude"], "latitude"),
-                        _number(body["longitude"], "longitude"),
-                        rainfall_inches=_optional_number(body, "rainfall_inches"),
+                        latitude=lat,
+                        longitude=lng,
+                        rainfall_inches=rain,
                     )
-                    self._write_json(200, payload)
+                    
+                    # Return only the ar_flood_data subset for lightning-fast AR plane anchoring
+                    print("Payload keys:", list(payload.keys()), flush=True)
+
+                    if "ar_flood_data" in payload:
+                        ar_response = payload["ar_flood_data"]
+                    else:
+                        ar_response = payload
+
+                    self._write_json(200, ar_response)
                 except KeyError as exc:
                     self._write_json(400, {"error": f"Missing required field: {exc.args[0]}"})
                 except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    import traceback
+                    traceback.print_exc()
                     self._write_json(400, {"error": f"Invalid request: {exc}"})
                 except (OSError, requests.RequestException, RuntimeError) as exc:
                     self._write_json(503, {"error": str(exc)})
@@ -111,8 +138,14 @@ def create_request_handler():
                 )
                 self._write_json(200, payload)
             except KeyError as exc:
+                import traceback
+                print("MISSING FIELD:", repr(exc), flush=True)
+                traceback.print_exc()
                 self._write_json(400, {"error": f"Missing required field: {exc.args[0]}"})
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                import traceback
+                print("FLOOD ERROR:", repr(exc), flush=True)
+                traceback.print_exc()
                 self._write_json(400, {"error": f"Invalid request: {exc}"})
             except (OSError, requests.RequestException, RuntimeError) as exc:
                 self._write_json(503, {"error": str(exc)})

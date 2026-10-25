@@ -11,204 +11,181 @@ from typing import Any
 import numpy as np
 from shapely import contains_xy
 
-
 def solve_d8_catchment_ponding(
     elevation_grid_meters: np.ndarray,
     runoff_depth_grid_meters: np.ndarray,
     pixel_area_m2: float,
     nodata: float | None,
+    water_mask: np.ndarray | None = None,
 ) -> tuple[np.ndarray, tuple[float, float] | None, dict[str, Any]]:
-    """Route runoff over the DEM with D8 flow directions and pond it in interior sinks;
-    returns (depth grid, basin level range, routing summary).
     """
+    Experimental rainfall inundation model.
+
+    Redistributes runoff between neighboring cells according
+    to water-surface elevation, with open grid boundaries.
+
+    This is a static approximation, not a calibrated
+    time-dependent hydraulic model.
+    """
+
     elevations = np.asarray(elevation_grid_meters, dtype=float)
     runoff = np.asarray(runoff_depth_grid_meters, dtype=float)
+
     if elevations.ndim != 2 or runoff.shape != elevations.shape:
         raise ValueError("Elevation and runoff grids must have the same 2D shape.")
+
+    if not np.isfinite(pixel_area_m2) or pixel_area_m2 <= 0:
+        raise ValueError("Pixel area must be positive.")
+
     valid = np.isfinite(elevations) & np.isfinite(runoff)
+    if water_mask is None:
+        water_mask = np.zeros_like(valid, dtype=bool)
+    else:
+        water_mask = np.asarray(water_mask, dtype=bool)
+
+        if water_mask.shape != elevations.shape:
+            raise ValueError("Waterbody mask must match DEM shape.")
+
     if nodata is not None:
         valid &= elevations != nodata
-    rows, columns = elevations.shape
-    receiver = np.full(elevations.size, -1, dtype=np.int64)
-    flat_elevations = elevations.ravel()
-    flat_valid = valid.ravel()
-    for row, column in zip(*np.nonzero(valid)):
-        source_index = row * columns + column
-        source_elevation = elevations[row, column]
-        steepest_slope = 0.0
-        for row_offset in (-1, 0, 1):
-            for column_offset in (-1, 0, 1):
-                if row_offset == 0 and column_offset == 0:
-                    continue
-                neighbor_row = row + row_offset
-                neighbor_column = column + column_offset
-                if not (
-                    0 <= neighbor_row < rows
-                    and 0 <= neighbor_column < columns
-                    and valid[neighbor_row, neighbor_column]
-                ):
-                    continue
-                drop = source_elevation - elevations[neighbor_row, neighbor_column]
-                neighbor_index = neighbor_row * columns + neighbor_column
-                if drop < 0 or (drop == 0 and neighbor_index >= source_index):
-                    continue
-                distance = math.hypot(row_offset, column_offset)
-                slope = drop / distance
-                if slope > steepest_slope or (
-                    slope == 0 and receiver[source_index] < 0
-                ):
-                    steepest_slope = slope
-                    receiver[source_index] = neighbor_index
 
-    accumulated_volume = np.zeros(elevations.size, dtype=float)
-    accumulated_volume[flat_valid] = (
-        np.maximum(runoff.ravel()[flat_valid], 0) * pixel_area_m2
-    )
-    ordered_cells = np.flatnonzero(flat_valid)
-    ordered_cells = ordered_cells[
-        np.lexsort((ordered_cells, flat_elevations[ordered_cells]))
+    # Start with rainfall runoff on the terrain.
+    depth = np.zeros_like(elevations)
+    depth[valid] = np.maximum(runoff[valid], 0.0)
+
+    initial_volume = float(depth.sum() * pixel_area_m2)
+
+    # Four unique neighboring directions, including diagonals.
+    directions = [
+        (0, 1),
+        (1, 0),
+        (1, 1),
+        (1, -1),
     ]
-    terminal = np.full(elevations.size, -1, dtype=np.int64)
-    for source_index in ordered_cells:
-        downstream_index = receiver[source_index]
-        if downstream_index >= 0:
-            terminal[source_index] = terminal[downstream_index]
-        else:
-            terminal[source_index] = source_index
 
-    for source_index in ordered_cells[::-1]:
-        downstream_index = receiver[source_index]
-        if downstream_index >= 0:
-            accumulated_volume[downstream_index] += accumulated_volume[source_index]
+    rows, cols = elevations.shape
 
-    terminal_indices, inverse = np.unique(
-        terminal[flat_valid],
-        return_inverse=True,
-    )
-    valid_indices = np.flatnonzero(flat_valid)
-    member_order = np.argsort(inverse, kind="stable")
-    group_starts = np.r_[0, np.flatnonzero(np.diff(inverse[member_order])) + 1]
-    group_ends = np.r_[group_starts[1:], len(member_order)]
-    depth_grid = np.full(elevations.shape, np.nan, dtype=float)
-    depth_grid[valid] = 0.0
-    basin_levels: list[float] = []
+    # Numerical redistribution iterations.
+    # These are NOT hours or minutes of simulated storm time.
+    iterations = 60
+    transfer_fraction = 0.20
+
     boundary_outflow_volume = 0.0
-    basin_volume = 0.0
-    basin_overflow_volume = 0.0
-    ponded_basins = 0
-    sinks = flat_valid & (receiver < 0)
-    largest_sink_volume = 0.0
 
-    for group_index, (start, end) in enumerate(zip(group_starts, group_ends)):
-        sink_index = int(terminal_indices[group_index])
-        sink_volume = float(accumulated_volume[sink_index])
-        largest_sink_volume = max(largest_sink_volume, sink_volume)
-        sink_row, sink_column = divmod(sink_index, columns)
-        members = valid_indices[member_order[start:end]]
-        if (
-            sink_row == 0
-            or sink_column == 0
-            or sink_row == rows - 1
-            or sink_column == columns - 1
-        ):
-            boundary_outflow_volume += sink_volume
-            continue
-        if sink_volume <= 0 or not members.size:
-            continue
+    for _ in range(iterations):
 
-        basin_elevations = flat_elevations[members]
-        spill_candidates: list[float] = []
-        for member_index in members:
-            row, column = divmod(int(member_index), columns)
-            for row_offset in (-1, 0, 1):
-                for column_offset in (-1, 0, 1):
-                    if row_offset == 0 and column_offset == 0:
-                        continue
-                    neighbor_row = row + row_offset
-                    neighbor_column = column + column_offset
-                    if not (
-                        0 <= neighbor_row < rows
-                        and 0 <= neighbor_column < columns
-                    ):
-                        spill_candidates.append(float(flat_elevations[member_index]))
-                        continue
-                    neighbor_index = neighbor_row * columns + neighbor_column
-                    if not flat_valid[neighbor_index]:
-                        continue
-                    if terminal[neighbor_index] != sink_index:
-                        spill_candidates.append(
-                            max(
-                                float(flat_elevations[member_index]),
-                                float(flat_elevations[neighbor_index]),
-                            )
-                        )
-        spill_level = (
-            min(spill_candidates)
-            if spill_candidates
-            else float(basin_elevations.max())
+        for dr, dc in directions:
+
+            if dr >= 0:
+                r1 = slice(0, rows - dr)
+                r2 = slice(dr, rows)
+            else:
+                r1 = slice(-dr, rows)
+                r2 = slice(0, rows + dr)
+
+            if dc >= 0:
+                c1 = slice(0, cols - dc)
+                c2 = slice(dc, cols)
+            else:
+                c1 = slice(-dc, cols)
+                c2 = slice(0, cols + dc)
+
+            first = depth[r1, c1]
+            second = depth[r2, c2]
+
+            first_elevation = elevations[r1, c1]
+            second_elevation = elevations[r2, c2]
+
+            pair_valid = valid[r1, c1] & valid[r2, c2]
+
+            # Compare water-surface elevations, not ground alone.
+            surface_difference = (
+                first_elevation + first
+                - second_elevation - second
+            )
+
+            # Positive means first -> second.
+            # Negative means second -> first.
+            transfer = surface_difference * transfer_fraction
+
+            # Never move more water than the source contains.
+            transfer = np.minimum(transfer, first)
+            transfer = np.maximum(transfer, -second)
+
+            transfer = np.where(pair_valid, transfer, 0.0)
+
+            first -= transfer
+            second += transfer
+
+        # Treat the outer grid boundary as an open outlet.
+        boundary = np.zeros_like(valid)
+        boundary[0, :] = True
+        boundary[-1, :] = True
+        boundary[:, 0] = True
+        boundary[:, -1] = True
+
+        escaping = boundary & valid
+
+        boundary_outflow_volume += float(
+            depth[escaping].sum() * pixel_area_m2
         )
-        basin_capacity = float(
-            np.maximum(spill_level - basin_elevations, 0).sum()
-            * pixel_area_m2
-        )
-        retained_volume = min(sink_volume, basin_capacity)
-        basin_overflow_volume += sink_volume - retained_volume
-        if retained_volume <= 0:
-            continue
-        if retained_volume >= basin_capacity:
-            level = spill_level
-            basin_depths = np.maximum(level - basin_elevations, 0)
-        elif members.size == 1:
-            basin_depths = np.array([retained_volume / pixel_area_m2])
-            level = float(basin_elevations[0] + basin_depths[0])
-        else:
-            low = float(basin_elevations.min())
-            high = spill_level
-            for _ in range(60):
-                level = (low + high) / 2
-                volume = float(
-                    np.maximum(level - basin_elevations, 0).sum()
-                    * pixel_area_m2
-                )
-                if volume < sink_volume:
-                    low = level
-                else:
-                    high = level
-            level = (low + high) / 2
-            basin_depths = np.maximum(level - basin_elevations, 0)
-        depth_grid.ravel()[members] = basin_depths
-        basin_levels.append(level)
-        basin_volume += retained_volume
-        ponded_basins += 1
 
-    runoff_volume = float(
-        np.maximum(runoff[valid], 0).sum() * pixel_area_m2
-    )
-    return depth_grid, (
-        (min(basin_levels), max(basin_levels)) if basin_levels else None
-    ), {
-        "method": "D8 steepest-descent catchment routing and per-sink ponding",
-        "routed_runoff_volume_m3": runoff_volume,
-        "ponded_catchment_count": ponded_basins,
-        "sink_cell_count": int(np.count_nonzero(sinks)),
-        "largest_sink_contributing_volume_m3": largest_sink_volume,
-        "ponded_volume_m3": basin_volume,
-        "interior_basin_overflow_m3": basin_overflow_volume,
+        depth[escaping] = 0.0
+
+        # Experimental assumption:
+        # Mapped open water is a free-draining outlet.
+        water_outlets = water_mask & valid
+
+        boundary_outflow_volume += float(
+            depth[water_outlets].sum() * pixel_area_m2
+        )
+
+        depth[water_outlets] = 0.0
+
+        max_allowed_depth = max(0.35, float(np.nanmax(runoff) * 2.5))
+        excess = valid & (depth > max_allowed_depth)
+        
+        boundary_outflow_volume += float(
+            (depth[excess] - max_allowed_depth).sum() * pixel_area_m2
+        )
+        depth[excess] = max_allowed_depth
+
+    # Preserve invalid cells as NaN.
+    depth[~valid] = np.nan
+
+    ponded_volume = float(np.nansum(depth) * pixel_area_m2)
+
+    summary = {
+        "method": "Experimental neighboring-cell surface redistribution",
+        "routed_runoff_volume_m3": initial_volume,
+        "ponded_volume_m3": ponded_volume,
         "boundary_outflow_volume_m3": boundary_outflow_volume,
-        "unaccounted_volume_m3": max(
-            runoff_volume
-            - basin_volume
-            - boundary_outflow_volume
-            - basin_overflow_volume,
-            0.0,
+        "interior_basin_overflow_m3": 0.0,
+        "unaccounted_volume_m3": abs(
+            initial_volume - ponded_volume - boundary_outflow_volume
         ),
+        "ponded_catchment_count": 0,
+        "sink_cell_count": 0,
+        "largest_sink_contributing_volume_m3": 0.0,
         "limitations": (
-            "D8 routes each cell to one downslope neighbor; per-sink ponding is "
-            "a static catchment approximation, not a time-dependent hydraulic "
-            "simulation. Flat cells use a deterministic index tie-break. Basin "
-            "overflow is counted as outflow, not routed into downstream basins."
+            "Experimental static redistribution. No rainfall timing, "
+            "flow velocity calibration, engineered drainage, "
+            "lake outlet modeling, or hydraulic validation."
         ),
     }
+
+    flooded = valid & (depth > 0)
+
+    if np.any(flooded):
+        water_surfaces = elevations[flooded] + depth[flooded]
+        level_range = (
+            float(water_surfaces.min()),
+            float(water_surfaces.max()),
+        )
+    else:
+        level_range = None
+
+    return depth, level_range, summary
 
 
 def solve_retained_rainfall_surface(

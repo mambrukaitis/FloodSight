@@ -60,17 +60,23 @@ def _point_depth_meters(
     point_is_waterbody = any(
         waterbody["geometry"].covers(point) for waterbody in sources.waterbodies
     )
-    if point_is_waterbody or rainfall_inches == 0 or retained_water_fraction == 0:
+    if rainfall_inches == 0 or retained_water_fraction == 0:
         return 0.0
     if retained_water_fraction is None:
-        return bilinear_sample(
-            model.depth_grid,
-            sources.dem_bounds,
-            longitude,
-            latitude,
-            sources.metric_crs,
-            None,
-        )
+        try:
+            point_depth = bilinear_sample(
+                model.depth_grid,
+                sources.dem_bounds,
+                longitude,
+                latitude,
+                sources.metric_crs,
+                None,
+            )
+
+
+            return point_depth
+        except ValueError:
+            return 0.0
     if model.water_surface_datum is None:
         return 0.0
     return max(model.water_surface_datum - dem_sample, 0.0)
@@ -183,6 +189,12 @@ def build_flood_payload(
         metric_crs,
         session,
     )
+
+    valid = np.isfinite(sources.dem_values)
+
+    if sources.dem_nodata is not None:
+        valid &= sources.dem_values != sources.dem_nodata
+
     dem_sample = bilinear_sample(
         sources.dem_values,
         sources.dem_bounds,
@@ -224,9 +236,7 @@ def build_flood_payload(
     offset = sources.vertical_offset_meters
     ground_elevation_output = round(dem_sample + offset, 3)
     water_surface_output = round(dem_sample + point_depth + offset, 3)
-    water_depth_output = round(
-        max(water_surface_output - ground_elevation_output, 0.0), 3
-    )
+    water_depth_output = round(max(point_depth, 0.0), 3)
     payload = {
         "ar_flood_data": {
             "ground_elevation_msl_meters": ground_elevation_output,
@@ -319,15 +329,15 @@ def build_ar_depth_payload(
     offset = sources.vertical_offset_meters
     ground_elevation_output = round(dem_sample + offset, 3)
     water_surface_output = round(dem_sample + point_depth + offset, 3)
-    water_depth_output = round(
-        max(water_surface_output - ground_elevation_output, 0.0), 3
-    )
+    water_depth_output = round(max(point_depth, 0.0), 3)
     
     payload = {
         "ground_elevation_msl_meters": ground_elevation_output,
         "water_depth_meters": water_depth_output,
         "is_flooded": water_depth_output > 0,
         "elevation_datum": output_datum,
+        "water_surface_msl_meters": round(
+        ground_elevation_output + water_depth_output, 3),
     }
     
     diagnostics = _build_diagnostics(
