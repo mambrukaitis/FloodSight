@@ -60,17 +60,23 @@ def _point_depth_meters(
     point_is_waterbody = any(
         waterbody["geometry"].covers(point) for waterbody in sources.waterbodies
     )
-    if point_is_waterbody or rainfall_inches == 0 or retained_water_fraction == 0:
+    if rainfall_inches == 0 or retained_water_fraction == 0:
         return 0.0
     if retained_water_fraction is None:
-        return bilinear_sample(
-            model.depth_grid,
-            sources.dem_bounds,
-            longitude,
-            latitude,
-            sources.metric_crs,
-            None,
-        )
+        try:
+            point_depth = bilinear_sample(
+                model.depth_grid,
+                sources.dem_bounds,
+                longitude,
+                latitude,
+                sources.metric_crs,
+                None,
+            )
+
+
+            return point_depth
+        except ValueError:
+            return 0.0
     if model.water_surface_datum is None:
         return 0.0
     return max(model.water_surface_datum - dem_sample, 0.0)
@@ -183,6 +189,12 @@ def build_flood_payload(
         metric_crs,
         session,
     )
+
+    valid = np.isfinite(sources.dem_values)
+
+    if sources.dem_nodata is not None:
+        valid &= sources.dem_values != sources.dem_nodata
+
     dem_sample = bilinear_sample(
         sources.dem_values,
         sources.dem_bounds,
@@ -224,9 +236,7 @@ def build_flood_payload(
     offset = sources.vertical_offset_meters
     ground_elevation_output = round(dem_sample + offset, 3)
     water_surface_output = round(dem_sample + point_depth + offset, 3)
-    water_depth_output = round(
-        max(water_surface_output - ground_elevation_output, 0.0), 3
-    )
+    water_depth_output = round(max(point_depth, 0.0), 3)
     payload = {
         "ar_flood_data": {
             "ground_elevation_msl_meters": ground_elevation_output,
@@ -245,6 +255,99 @@ def build_flood_payload(
         rainfall_intensity_inches_per_hour,
         rainfall_duration_hours,
         retained_water_fraction,
+        sources,
+        model,
+        point_depth,
+        dem_sample,
+        request_started,
+    )
+    return payload, diagnostics
+
+
+def build_ar_depth_payload(
+    latitude: float,
+    longitude: float,
+    *,
+    rainfall_inches: float | None = None,
+    session: requests.Session | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Build a fast point-only flood depth estimate without map contours for AR."""
+    request_started = perf_counter()
+    # We need a dummy bbox to fetch the immediate surrounding terrain.
+    # The AR depth doesn't care about a map viewport, so we just use a small 100m box.
+    from floodsight.grid_geometry import bbox_around_point
+    bbox_wgs84 = bbox_around_point(latitude, longitude, side_meters=100.0)
+    validate_request(latitude, longitude, bbox_wgs84)
+    
+    rainfall_inches = resolve_rainfall_inches(
+        rainfall_inches,
+        None,
+        None,
+    )
+    
+    metric_crs = local_utm_epsg(latitude, longitude)
+    analysis_bbox_wgs84, analysis_metric_bounds = analysis_domain(
+        bbox_wgs84, metric_crs
+    )
+
+    sources = fetch_source_data(
+        latitude,
+        longitude,
+        analysis_bbox_wgs84,
+        analysis_metric_bounds,
+        metric_crs,
+        session,
+    )
+    dem_sample = bilinear_sample(
+        sources.dem_values,
+        sources.dem_bounds,
+        longitude,
+        latitude,
+        sources.metric_crs,
+        sources.dem_nodata,
+    )
+    water_mask = waterbody_raster_mask(
+        sources.waterbodies, sources.dem_bounds, sources.dem_values.shape
+    )
+    # retained_water_fraction is None for standard SCS routing
+    model = run_depth_model(sources, rainfall_inches, None, water_mask)
+    point_depth = _point_depth_meters(
+        latitude,
+        longitude,
+        rainfall_inches,
+        None,
+        sources,
+        model,
+        dem_sample,
+    )
+
+    output_datum = (
+        "LMSL"
+        if sources.vertical_conversion["status"] == "converted"
+        else sources.dem_datum or "unknown"
+    )
+    offset = sources.vertical_offset_meters
+    ground_elevation_output = round(dem_sample + offset, 3)
+    water_surface_output = round(dem_sample + point_depth + offset, 3)
+    water_depth_output = round(max(point_depth, 0.0), 3)
+    
+    payload = {
+        "ground_elevation_msl_meters": ground_elevation_output,
+        "water_depth_meters": water_depth_output,
+        "is_flooded": water_depth_output > 0,
+        "elevation_datum": output_datum,
+        "water_surface_msl_meters": round(
+        ground_elevation_output + water_depth_output, 3),
+    }
+    
+    diagnostics = _build_diagnostics(
+        latitude,
+        longitude,
+        bbox_wgs84,
+        rainfall_inches,
+        None,
+        None,
+        None,
         sources,
         model,
         point_depth,

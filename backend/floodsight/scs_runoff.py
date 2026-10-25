@@ -105,7 +105,7 @@ def curve_number_grid(
                 + values[upper_group] * group_fraction
             )
         curve_numbers += class_fractions[index] * class_curve_numbers
-    curve_numbers[water_mask] = np.nan
+    curve_numbers[water_mask] = 100.0
     return curve_numbers, {
         "mapped_class_pixel_count": int(
             np.count_nonzero(np.isin(source_classes, list(known_classes)))
