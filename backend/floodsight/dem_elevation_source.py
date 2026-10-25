@@ -28,7 +28,6 @@ THREEDEP_EXPORT_URL = (
 THREEDEP_IDENTIFY_URL = THREEDEP_EXPORT_URL.rsplit("/", 1)[0] + "/identify"
 MAX_DEM_PIXELS = 35_000
 
-
 def dem_grid_shape(
     bbox_wgs84: tuple[float, float, float, float],
     metric_crs: int,

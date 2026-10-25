@@ -48,21 +48,41 @@ class FloodHttpServiceTests(unittest.TestCase):
         self.assertIn("error", content)
 
     def test_missing_and_non_numeric_fields_return_400(self) -> None:
-        status, content = self._request("POST", "/flood", {"longitude": -82.3})
+        status, content = self._request("POST", "/flood", {"rainfall_inches": 3})
         self.assertEqual(status, 400)
-        self.assertIn("latitude", content["error"])
+        self.assertIn("southwest", content["error"])
+        status, content = self._request(
+            "POST",
+            "/flood",
+            {"southwest": {"latitude": 29.5}, "northeast": {"latitude": 29.7, "longitude": -82.2}},
+        )
+        self.assertEqual(status, 400)
+        self.assertIn("longitude", content["error"])
         status, _ = self._request(
             "POST",
             "/flood",
-            {"latitude": "29.6", "longitude": -82.3, "bbox_wgs84": [-82.4, 29.5, -82.2, 29.7]},
+            {
+                "southwest": {"latitude": "29.5", "longitude": -82.4},
+                "northeast": {"latitude": 29.7, "longitude": -82.2},
+            },
+        )
+        self.assertEqual(status, 400)
+
+    def test_swapped_corners_return_400(self) -> None:
+        status, _ = self._request(
+            "POST",
+            "/flood",
+            {
+                "southwest": {"latitude": 29.7, "longitude": -82.2},
+                "northeast": {"latitude": 29.5, "longitude": -82.4},
+            },
         )
         self.assertEqual(status, 400)
 
     def test_unexpected_error_returns_json_500(self) -> None:
         body = {
-            "latitude": 29.645,
-            "longitude": -82.345,
-            "bbox_wgs84": [-82.35, 29.64, -82.34, 29.65],
+            "southwest": {"latitude": 29.64, "longitude": -82.35},
+            "northeast": {"latitude": 29.65, "longitude": -82.34},
         }
         with patch("floodsight.http_api.build_flood_payload", side_effect=ZeroDivisionError):
             status, content = self._request("POST", "/flood", body)
@@ -80,9 +100,8 @@ class FloodHttpServiceTests(unittest.TestCase):
             "map_contours": [],
         }
         body = {
-            "latitude": 29.645,
-            "longitude": -82.345,
-            "bbox_wgs84": [-82.35, 29.64, -82.34, 29.65],
+            "southwest": {"latitude": 29.64, "longitude": -82.35},
+            "northeast": {"latitude": 29.65, "longitude": -82.34},
             "rainfall_inches": 5,
             "retained_water_fraction": 0.1,
         }
