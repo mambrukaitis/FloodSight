@@ -7,6 +7,10 @@ from __future__ import annotations
 import io
 import math
 
+import time
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 import numpy as np
 from pyproj import Transformer
 import requests
@@ -22,8 +26,7 @@ THREEDEP_EXPORT_URL = (
     "3DEPElevation/ImageServer/exportImage"
 )
 THREEDEP_IDENTIFY_URL = THREEDEP_EXPORT_URL.rsplit("/", 1)[0] + "/identify"
-MAX_DEM_PIXELS = 20_000
-
+MAX_DEM_PIXELS = 35_000
 
 def dem_grid_shape(
     bbox_wgs84: tuple[float, float, float, float],
@@ -80,21 +83,36 @@ def fetch_dem(
         columns = max(1, math.ceil(width_m / pixel_size_m))
         rows = max(1, math.ceil(height_m / pixel_size_m))
 
-    response = session.get(
-        THREEDEP_EXPORT_URL,
-        params={
-            "bbox": ",".join(f"{value:.8f}" for value in (xmin, ymin, xmax, ymax)),
-            "bboxSR": metric_crs,
-            "size": f"{columns},{rows}",
-            "imageSR": metric_crs,
-            "format": "tiff",
-            "pixelType": "F32",
-            "interpolation": "RSP_NearestNeighbor",
-            "adjustAspectRatio": "false",
-            "f": "image",
-        },
-        timeout=(10, 90),
+    retry = Retry(
+        total=6,               # Try up to 6 times instead of 3
+        connect=6,             # Explicitly retry connection drops
+        read=6,                # Explicitly retry read timeouts
+        backoff_factor=2,      # Wait longer between tries (2s, 4s, 8s, 16s...)
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
     )
+
+    adapter = HTTPAdapter(max_retries=retry)
+
+    with requests.Session() as retry_session:
+        retry_session.mount("https://", adapter)
+
+        response = retry_session.get(
+            THREEDEP_EXPORT_URL,
+            params={
+                "bbox": ",".join(f"{value:.8f}" for value in (xmin, ymin, xmax, ymax)),
+                "bboxSR": metric_crs,
+                "size": f"{columns},{rows}",
+                "imageSR": metric_crs,
+                "format": "tiff",
+                "pixelType": "F32",
+                "interpolation": "RSP_NearestNeighbor",
+                "adjustAspectRatio": "false",
+                "f": "image",
+            },
+            timeout=(10, 90),
+        )
+
     response.raise_for_status()
     with tifffile.TiffFile(io.BytesIO(response.content)) as raster:
         page = raster.pages[0]

@@ -162,8 +162,11 @@ def bilinear_sample(
     x, y = forward.transform(longitude, latitude)
     column_position = (x - xmin) / ((xmax - xmin) / columns) - 0.5
     row_position = (ymax - y) / ((ymax - ymin) / rows) - 0.5
+
+
     column0 = math.floor(column_position)
     row0 = math.floor(row_position)
+
     column_fraction = column_position - column0
     row_fraction = row_position - row0
     samples: list[tuple[float, float]] = []

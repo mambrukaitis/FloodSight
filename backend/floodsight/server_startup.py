@@ -27,7 +27,7 @@ def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
     """
     server = ThreadingHTTPServer((host, port), create_request_handler())
     threading.Thread(target=warm_up, daemon=True).start()
-    print(f"FloodSight service listening at http://{host}:{port} (POST /flood, GET /waterbodies, GET /health)")
+    print(f"FloodSight service listening at http://{host}:{port} (POST /flood, POST /ar-depth, GET /waterbodies, GET /health)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

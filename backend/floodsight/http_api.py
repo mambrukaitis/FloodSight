@@ -11,7 +11,7 @@ from urllib.parse import parse_qs, urlparse
 
 import requests
 
-from floodsight.flood_payload import build_flood_payload
+from floodsight.flood_payload import build_flood_payload, build_ar_depth_payload
 from floodsight.grid_geometry import validate_request
 from floodsight.groundsource_history import GROUND_SOURCE_PATH
 from floodsight.waterbody_source import waterbody_feature_collection
@@ -57,8 +57,60 @@ def create_request_handler():
                 self._write_json(500, {"error": "Internal server error."})
 
         def do_POST(self) -> None:
+
+            if self.path == "/ar-depth":
+                try:
+                    content_length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < content_length <= MAX_REQUEST_BYTES:
+                        raise ValueError(f"Request body must be between 1 and {MAX_REQUEST_BYTES} bytes.")
+                    body = json.loads(self.rfile.read(content_length))
+                    if not isinstance(body, dict):
+                        raise ValueError("Request body must be a JSON object.")
+                    
+                    lat = _number(body["latitude"], "latitude")
+                    lng = _number(body["longitude"], "longitude")
+                    rain = _optional_number(body, "rainfall_inches")
+                    if rain is None:
+                        rain = 10.0  # Default fallback rainfall
+
+                    # FIX: Create a ~500m surrounding buffer box so water can pool via D8 routing
+                    buffer = 0.005
+                    ar_bbox = [
+                        lng - buffer,  # west
+                        lat - buffer,  # south
+                        lng + buffer,  # east
+                        lat + buffer   # north
+                    ]
+
+                    payload, _ = build_ar_depth_payload(
+                        latitude=lat,
+                        longitude=lng,
+                        rainfall_inches=rain,
+                    )
+                    
+                    # Return only the ar_flood_data subset for lightning-fast AR plane anchoring
+                    print("Payload keys:", list(payload.keys()), flush=True)
+
+                    if "ar_flood_data" in payload:
+                        ar_response = payload["ar_flood_data"]
+                    else:
+                        ar_response = payload
+
+                    self._write_json(200, ar_response)
+                except KeyError as exc:
+                    self._write_json(400, {"error": f"Missing required field: {exc.args[0]}"})
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                    import traceback
+                    traceback.print_exc()
+                    self._write_json(400, {"error": f"Invalid request: {exc}"})
+                except (OSError, requests.RequestException, RuntimeError) as exc:
+                    self._write_json(503, {"error": str(exc)})
+                except Exception:
+                    self._write_json(500, {"error": "Internal server error."})
+                return
+
             if self.path != "/flood":
-                self._write_json(404, {"error": "POST endpoint must be /flood."})
+                self._write_json(404, {"error": "POST endpoint must be /flood or /ar-depth."})
                 return
             try:
                 content_length = int(self.headers.get("Content-Length", "0"))
@@ -88,8 +140,14 @@ def create_request_handler():
                 )
                 self._write_json(200, payload)
             except KeyError as exc:
+                import traceback
+                print("MISSING FIELD:", repr(exc), flush=True)
+                traceback.print_exc()
                 self._write_json(400, {"error": f"Missing required field: {exc.args[0]}"})
             except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                import traceback
+                print("FLOOD ERROR:", repr(exc), flush=True)
+                traceback.print_exc()
                 self._write_json(400, {"error": f"Invalid request: {exc}"})
             except (OSError, requests.RequestException, RuntimeError) as exc:
                 self._write_json(503, {"error": str(exc)})

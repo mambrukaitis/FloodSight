@@ -8,7 +8,7 @@ import threading
 import unittest
 from http.server import ThreadingHTTPServer
 from unittest.mock import patch
-from floodsight.http_api import create_request_handler
+from backend.floodsight.http_api import create_request_handler
 
 
 class FloodHttpServiceTests(unittest.TestCase):

@@ -70,16 +70,21 @@ def _run_scs_d8_model(
         MAX_DRAINAGE_MULTIPLIER,
         1.0 + (math.sqrt(historical_event_count) * EVENT_SCALAR)
     )
-    runoff_depth_grid = runoff_depth_grid * urban_drainage_multiplier
-
+    urban_drainage_multiplier = 1.0
     pixel_area_m2 = (
         (dem_bounds[2] - dem_bounds[0])
         * (dem_bounds[3] - dem_bounds[1])
         / dem_values.size
     )
+
     depth_grid, _basin_level_range, _routing_summary = solve_d8_catchment_ponding(
-        dem_values, runoff_depth_grid, pixel_area_m2, sources.dem_nodata
+        dem_values,
+        runoff_depth_grid,
+        pixel_area_m2,
+        sources.dem_nodata,
+        water_mask=water_mask,
     )
+
     land_cell_count = int(np.isfinite(runoff_depth_grid).sum())
     effective_rainfall_inches = (
         float(np.nansum(runoff_depth_grid) / land_cell_count * METERS_TO_INCHES)
