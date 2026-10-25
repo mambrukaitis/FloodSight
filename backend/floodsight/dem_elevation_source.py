@@ -22,7 +22,7 @@ THREEDEP_EXPORT_URL = (
     "3DEPElevation/ImageServer/exportImage"
 )
 THREEDEP_IDENTIFY_URL = THREEDEP_EXPORT_URL.rsplit("/", 1)[0] + "/identify"
-MAX_DEM_PIXELS = 50_000
+MAX_DEM_PIXELS = 20_000
 
 
 def dem_grid_shape(
